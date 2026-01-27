@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { Search, Image as ImageIcon, Loader2, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink } from "lucide-react"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Search, Image as ImageIcon, Loader2, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink, AlertTriangle } from "lucide-react"
 import { ImageCard, type ImageData } from "@/components/image-card"
 import { Modal } from "@/components/ui/modal"
 import NextImage from "next/image"
@@ -44,6 +45,7 @@ export default function FolderPage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<Image[]>([])
   const [searching, setSearching] = useState(false)
+  const [searchFallbackMode, setSearchFallbackMode] = useState(false)
   const [retryingImages, setRetryingImages] = useState<Set<string>>(new Set())
   const [retryingAll, setRetryingAll] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -137,6 +139,7 @@ export default function FolderPage() {
             similarity: Math.round(result.similarity * 1000) / 1000, // Round to 3 decimal places
           }))
           setSearchResults(formattedResults)
+          setSearchFallbackMode(data.fallbackMode || false)
         }
       } catch (error) {
         console.error("Search error:", error)
@@ -559,6 +562,15 @@ export default function FolderPage() {
                 <p className="text-xs text-muted-foreground mt-1">
                   {searching ? "Searching..." : `Showing ${searchResults.length} result${searchResults.length !== 1 ? 's' : ''}`}
                 </p>
+              )}
+              {searchFallbackMode && (
+                <Alert className="mt-3 border-orange-200 bg-orange-50 dark:bg-orange-950/20">
+                  <AlertTriangle className="h-4 w-4 text-orange-600 dark:text-orange-400" />
+                  <AlertTitle className="text-orange-800 dark:text-orange-200">Limited Search Mode</AlertTitle>
+                  <AlertDescription className="text-orange-700 dark:text-orange-300">
+                    Semantic search is unavailable. Using filename search instead. Results may be less accurate.
+                  </AlertDescription>
+                </Alert>
               )}
             </CardContent>
           </Card>

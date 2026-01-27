@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma"
 import { listImagesRecursively, type DriveFile } from "@/lib/drive"
 import { queueFolderProcessing } from "@/lib/queue"
 import { encrypt } from "@/lib/encryption"
+import { ingestRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
 // Get the maximum images limit from environment variable
 const getMaxImagesLimit = (): number | null => {
@@ -17,6 +18,26 @@ const getMaxImagesLimit = (): number | null => {
 
 export async function POST(request: NextRequest) {
   try {
+    // Rate limiting (strict limit for expensive operation)
+    const identifier = getClientIdentifier(request)
+    const rateLimitResult = await checkRateLimit(ingestRateLimiter, identifier)
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000)
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getRateLimitHeaders(rateLimitResult, 10),
+            'Retry-After': Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const { userId: clerkUserId } = await auth()
     
     // Try to get Google OAuth token from SSO connection (optional - will be null if user hasn't connected Google)

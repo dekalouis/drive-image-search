@@ -5,9 +5,30 @@ import { prisma } from "@/lib/prisma"
 import { imageQueue, queueImageBatch } from "@/lib/queue"
 import { decrypt } from "@/lib/encryption"
 import { validateFolderAccess } from "@/lib/folder-auth"
+import { defaultRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
 export async function POST(request: NextRequest) {
   try {
+    // Rate limiting
+    const identifier = getClientIdentifier(request)
+    const rateLimitResult = await checkRateLimit(defaultRateLimiter, identifier)
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000)
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getRateLimitHeaders(rateLimitResult, 100),
+            'Retry-After': Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const { userId } = await auth()
     
     // Try to get current user's Google OAuth token
