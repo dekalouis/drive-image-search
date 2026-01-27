@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { ensurePgvectorExtension } from "@/lib/db-init"
 import { generateTextEmbedding, normalizeTextForEmbedding } from "@/lib/gemini"
+import { searchRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
 // Helper function to clean captions
 function cleanCaption(caption?: string | null): string | null {
@@ -52,6 +53,26 @@ interface SearchResult {
 
 export async function POST(request: NextRequest) {
   try {
+    // Rate limiting
+    const identifier = getClientIdentifier(request)
+    const rateLimitResult = await checkRateLimit(searchRateLimiter, identifier)
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000)
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getRateLimitHeaders(rateLimitResult, 60),
+            'Retry-After': Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const { folderId, query, topK = 12, searchType } = await request.json()
 
     if (!folderId || !query) {
@@ -81,6 +102,7 @@ export async function POST(request: NextRequest) {
     let results: SearchResult[] = []
     let searchTime = 0
     let embeddingTime = 0
+    let fallbackMode = false
     
     if (isFilenameSearch) {
       // Filename search using SQL LIKE
@@ -164,6 +186,7 @@ export async function POST(request: NextRequest) {
         const errorMessage = error?.message || String(error)
         if (errorMessage.includes('pgvector') || errorMessage.includes('vector') || errorMessage.includes('extension')) {
           console.warn(`⚠️  pgvector not available, falling back to filename search: ${errorMessage}`)
+          fallbackMode = true  // Set fallback flag
           
           // Fallback to filename search
           const searchPattern = `%${trimmedQuery}%`
@@ -229,6 +252,7 @@ export async function POST(request: NextRequest) {
       results: formattedResults,
       query: trimmedQuery,
       searchType: isFilenameSearch ? "filename" : "semantic",
+      fallbackMode,
       totalCandidates: totalCount,
       timing: {
         embedding: embeddingTime,
