@@ -1,118 +1,177 @@
 # Google Drive Image Searcher
 
-🎯 Recommended Daily Workflow
-Start workers once (they'll keep running):
-```npm run start:workers-only```
-Start dev server (in another terminal):
-```npm run dev```
-Add folders via the web interface
-```npm run workers:status```
-Delete folders safely:
-```npm run folder:delete <folderId>```
-
-
-safe delete
-```npx tsx scripts/safe-delete.ts DELETE ALL```
-```npx tsx scripts/clear-all-queues.ts```
-
-
-run locally with
-```
-# Start everything (dev server + workers)
-npm run start:all (should automatically run workers)
-```
-
-For Production
-```
-# Install PM2 globally
-npm install -g pm2
-
-# Start workers with PM2
-npm run workers:start
-
-# Check status
-npm run workers:status
-
-# View logs
-npm run workers:logs
-
-# Stop workers
-npm run workers:stop
-```
-
-If issues with PM2
-# Stop all PM2 processes
-pm2 stop all
-# Delete all PM2 processes
-pm2 delete all
-# Verify everything is cleared
-pm2 status
-# Kill PM2 daemon
-pm2 kill
-# Start PM2 fresh
-pm2 start
-# Start only your current workers
-npm run workers:start
-# Check status - should only show drive-image-workers
-npm run workers:status
-
-A powerful Next.js application that allows you to search through images in public Google Drive folders using AI-powered semantic search.
+A powerful Next.js application that allows you to search through images in Google Drive folders (public or private) using AI-powered semantic search.
 
 ## Features
 
-- 🔗 **Public Google Drive Integration**: Paste any public Google Drive folder URL
+- 🔗 **Google Drive Integration**: Paste any Google Drive folder URL (public or private when logged in)
 - 🖼️ **Instant Image Display**: View thumbnails immediately while processing happens in background
 - 🤖 **AI-Powered Captioning**: Uses Gemini 2.5 Flash to generate detailed captions and tags
 - 🔍 **Semantic Search**: Find images using natural language queries with vector similarity
-- ⚡ **Real-time Progress**: Live updates on processing status with Server-Sent Events
+- ⚡ **Real-time Progress**: Live updates on processing status
 - 🎯 **Background Processing**: Efficient job queues with BullMQ and Redis
 
-## Quick Start
+## Getting Started
 
-1. **Clone and install dependencies**:
-   \`\`\`bash
-   npm install
-   \`\`\`
+### Prerequisites
 
-2. **Set up your environment**:
-   \`\`\`bash
-   cp .env.example .env
-   # Edit .env with your API keys and database URLs
-   \`\`\`
+- Node.js >= 20.9.0
+- PostgreSQL with pgvector extension
+- Redis server
+- Google Drive API key
+- Google Gemini API key
+- Clerk account (for authentication)
 
-3. **Set up the database and generate Prisma client**:
-   \`\`\`bash
-   npm run setup-dev
-   \`\`\`
+### 1. Install Dependencies
 
-4. **Start the development server**:
-   \`\`\`bash
-   npm run dev
-   \`\`\`
+```bash
+npm install
+```
 
-5. **Start the background workers** (in a separate terminal):
-   \`\`\`bash
+### 2. Set Up Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and configure:
+
+```env
+# Database (PostgreSQL with pgvector support)
+DATABASE_URL="postgresql://username:password@localhost:5432/drive_searcher?schema=public"
+
+# Redis for job queues
+REDIS_URL="redis://localhost:6379"
+
+# Google APIs
+GOOGLE_DRIVE_API_KEY="your_google_drive_api_key_here"
+GEMINI_API_KEY="your_gemini_api_key_here"
+
+# Clerk Authentication
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_your_publishable_key_here"
+CLERK_SECRET_KEY="sk_test_your_secret_key_here"
+
+# Token Encryption (REQUIRED for private folder support)
+# Generate with: openssl rand -hex 32
+TOKEN_ENCRYPTION_KEY="your_32_byte_hex_key_here"
+```
+
+**Important:** Generate the encryption key:
+```bash
+openssl rand -hex 32
+```
+Copy the output and paste it as `TOKEN_ENCRYPTION_KEY` in your `.env` file.
+
+### 3. Set Up Database
+
+```bash
+# Generate Prisma client and push schema to database
+npm run setup-dev
+```
+
+This will:
+- Generate Prisma client
+- Push database schema (creates tables and indexes)
+- Set up pgvector extension if available
+
+### 4. Reset Database (if needed)
+
+To completely reset the database and clear all data:
+
+```bash
+npm run db:reset
+```
+
+This will:
+- Drop all tables
+- Re-run all migrations
+- Clear all Redis queues
+- Recreate the database schema
+
+### 5. Start the Application
+
+**Terminal 1 - Development Server:**
+```bash
+npm run dev
+```
+
+**Terminal 2 - Background Workers:**
+```bash
+npm run workers
+```
+
+The app will be available at `http://localhost:3000`
+
+## Daily Workflow
+
+**Recommended workflow for development:**
+
+1. Start workers once (they'll keep running):
+   ```bash
    npm run workers
-   \`\`\`
+   ```
+
+2. Start dev server (in another terminal):
+   ```bash
+   npm run dev
+   ```
+
+3. Add folders via the web interface at `http://localhost:3000`
+
+4. Check worker status:
+   ```bash
+   npm run workers:status
+   ```
+
+## Available Scripts
+
+### Development
+- `npm run dev` - Start Next.js development server
+- `npm run workers` - Start background job workers
+- `npm run start:all` - Start both dev server and workers (uses shell script)
+
+### Database
+- `npm run db:generate` - Generate Prisma client
+- `npm run db:push` - Push schema to database (no migration)
+- `npm run db:migrate` - Create and apply migration
+- `npm run db:reset` - **Reset database** (drops all tables, re-runs migrations, clears queues)
+- `npm run db:studio` - Open Prisma Studio (database GUI)
+
+### Workers (Production with PM2)
+- `npm run workers:start` - Start workers with PM2
+- `npm run workers:stop` - Stop workers
+- `npm run workers:restart` - Restart workers
+- `npm run workers:logs` - View worker logs
+- `npm run workers:status` - Check worker status
+
+### Utilities
+- `npm run health-check` - Check system health
+- `npm run queue:clear` - Clear all job queues
+- `npm run folder:status` - Check folder processing status
+- `npm run folder:retry` - Retry failed folder processing
+- `npm run folder:delete` - Safely delete a folder
 
 ## Environment Variables
 
-- `DATABASE_URL`: PostgreSQL connection string with pgvector support
-- `REDIS_URL`: Redis connection string for job queues
-- `GOOGLE_DRIVE_API_KEY`: Google Drive API key for accessing public folders
-- `GEMINI_API_KEY`: Google AI API key for image captioning
-
-> Workers automatically run `CREATE EXTENSION IF NOT EXISTS vector` on startup.
-> Make sure your Railway/PostgreSQL plan exposes the pgvector extension so this
-> succeeds during deployments.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string with pgvector support |
+| `REDIS_URL` | Yes | Redis connection string for job queues |
+| `GOOGLE_DRIVE_API_KEY` | Yes | Google Drive API key for accessing folders |
+| `GEMINI_API_KEY` | Yes | Google AI API key for image captioning |
+| `TOKEN_ENCRYPTION_KEY` | Yes | 32-byte hex key for encrypting OAuth tokens (generate with `openssl rand -hex 32`) |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes | Clerk publishable key for authentication |
+| `CLERK_SECRET_KEY` | Yes | Clerk secret key |
+| `MAX_IMAGES_PER_FOLDER` | No | Maximum images per folder (default: 200) |
 
 ## Usage
 
 1. Visit `http://localhost:3000`
-2. Paste a public Google Drive folder URL
-3. Watch as images are displayed immediately and processed in the background
-4. Use the search box to find images using natural language queries
-5. View detailed captions and similarity scores
+2. **For public folders:** Paste a Google Drive folder URL (must be shared with "Anyone with the link")
+3. **For private folders:** Log in with Google account, then paste the folder URL
+4. Watch as images are displayed immediately and processed in the background
+5. Use the search box to find images using natural language queries
+6. View detailed captions and similarity scores
 
 ## Architecture
 
@@ -120,14 +179,30 @@ A powerful Next.js application that allows you to search through images in publi
 - **Database**: PostgreSQL with pgvector for vector similarity search
 - **Background Jobs**: BullMQ with Redis for reliable job processing
 - **AI**: Google Gemini 2.5 Flash for image analysis and text embeddings
-- **Real-time Updates**: Server-Sent Events for live progress tracking
+- **Authentication**: Clerk for user management and OAuth
 
-## Scripts
+> **Note:** Workers automatically run `CREATE EXTENSION IF NOT EXISTS vector` on startup.
+> Make sure your PostgreSQL instance has pgvector extension installed.
 
-- `npm run dev` - Start development server
-- `npm run workers` - Start background job workers
-- `npm run db:generate` - Generate Prisma client
-- `npm run db:push` - Push schema to database
-- `npm run health-check` - Check system health
-- `npm run clean-queues` - Clean job queues
-# v0-drive
+## Troubleshooting
+
+### Database Reset
+If you need to start fresh:
+```bash
+npm run db:reset
+```
+
+### Clear Queues
+If jobs are stuck:
+```bash
+npm run queue:clear
+```
+
+### PM2 Issues
+If PM2 workers aren't working:
+```bash
+pm2 stop all
+pm2 delete all
+pm2 kill
+npm run workers:start
+```

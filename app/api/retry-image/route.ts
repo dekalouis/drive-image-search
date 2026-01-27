@@ -1,9 +1,29 @@
 import { NextRequest, NextResponse } from "next/server"
+import { auth } from "@clerk/nextjs/server"
+import { clerkClient } from "@clerk/nextjs/server"
 import { prisma } from "@/lib/prisma"
 import { imageQueue, queueImageBatch } from "@/lib/queue"
+import { decrypt } from "@/lib/encryption"
 
 export async function POST(request: NextRequest) {
   try {
+    const { userId } = await auth()
+    
+    // Try to get current user's Google OAuth token
+    let accessToken: string | undefined = undefined
+    if (userId) {
+      try {
+        const client = await clerkClient()
+        const tokenResponse = await client.users.getUserOauthAccessToken(userId, 'google')
+        if (tokenResponse?.data?.[0]?.token) {
+          accessToken = tokenResponse.data[0].token
+          console.log("✅ Using current user's OAuth token for retry")
+        }
+      } catch (e) {
+        console.log("ℹ️  No OAuth token from current user")
+      }
+    }
+
     const { imageId, folderId } = await request.json()
 
     if (!imageId && !folderId) {
@@ -42,13 +62,14 @@ export async function POST(request: NextRequest) {
         WHERE id = ${imageId}
       `
 
-      // Add to image processing queue
+      // Add to image processing queue with token if available
       await imageQueue.add("image", {
         fileId: image.fileId,
         name: image.name,
         mimeType: image.mimeType,
         folderId: image.folderId,
-        imageId: image.id
+        imageId: image.id,
+        accessToken
       })
 
       console.log(`✅ Queued image for retry: ${image.name}`)
@@ -64,7 +85,12 @@ export async function POST(request: NextRequest) {
       
       const folder = await prisma.folder.findUnique({
         where: { id: folderId },
-        select: { id: true, status: true }
+        select: { 
+          id: true, 
+          status: true,
+          accessTokenEncrypted: true,
+          tokenExpiresAt: true
+        }
       })
 
       if (!folder) {
@@ -72,6 +98,20 @@ export async function POST(request: NextRequest) {
           { error: "Folder not found" },
           { status: 404 }
         )
+      }
+
+      // Try to get stored token if no user token available
+      if (!accessToken && folder.accessTokenEncrypted && folder.tokenExpiresAt) {
+        if (new Date() < folder.tokenExpiresAt) {
+          try {
+            accessToken = decrypt(folder.accessTokenEncrypted)
+            console.log("✅ Using stored token for retry")
+          } catch (e) {
+            console.warn("⚠️  Failed to decrypt stored token")
+          }
+        } else {
+          console.warn("⚠️  Stored token expired")
+        }
       }
 
       // Get failed images
@@ -150,7 +190,7 @@ export async function POST(request: NextRequest) {
         await queueImageBatch({
           images: batchData,
           folderId: folder.id,
-          accessToken: undefined
+          accessToken // Now properly passed!
         })
         queuedBatches++
       }

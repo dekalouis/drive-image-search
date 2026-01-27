@@ -22,18 +22,22 @@ model User {
 }
 
 model Folder {
-  id              String   @id @default(cuid())
-  folderId        String   @unique // Google folder ID
-  name            String?  // Folder name from Google Drive
-  folderUrl       String
-  status          String   // 'pending' | 'processing' | 'completed' | 'failed'
-  totalImages     Int      @default(0)
-  processedImages Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  images          Image[]
-  userId          String?  // Optional for backward compatibility
-  user            User?    @relation(fields: [userId], references: [id])
+  id                    String    @id @default(cuid())
+  folderId              String    @unique // Google folder ID
+  name                  String?   // Folder name from Google Drive
+  folderUrl             String
+  status                String    // 'pending' | 'processing' | 'completed' | 'failed'
+  totalImages           Int       @default(0)
+  processedImages       Int       @default(0)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  images                Image[]
+  userId                String?   // Optional for backward compatibility
+  user                  User?     @relation(fields: [userId], references: [id])
+  
+  // OAuth token storage for background processing
+  accessTokenEncrypted  String?   // Encrypted Google OAuth access token
+  tokenExpiresAt        DateTime? // Token expiration time
 
   @@index([userId])
   @@map("folders")

@@ -1,6 +1,7 @@
 import { folderWorker, imageWorker } from "../lib/workers"
 import { prisma } from "../lib/prisma"
 import { queueImageBatch } from "../lib/queue"
+import { decrypt } from "../lib/encryption"
 
 // Prevent overlapping recoveries
 let isRecovering = false
@@ -70,10 +71,25 @@ async function recoverPendingImages() {
           name: img.name
         }))
         
+        // Get stored token if available
+        let accessToken: string | undefined = undefined
+        if (folder.accessTokenEncrypted && folder.tokenExpiresAt) {
+          if (new Date() < folder.tokenExpiresAt) {
+            try {
+              accessToken = decrypt(folder.accessTokenEncrypted)
+              console.log(`🔑 Using stored token for folder ${folder.folderId}`)
+            } catch (e) {
+              console.warn(`⚠️  Failed to decrypt token for folder ${folder.folderId}`)
+            }
+          } else {
+            console.warn(`⚠️  Token expired for folder ${folder.folderId}`)
+          }
+        }
+        
         await queueImageBatch({
           images: batchData,
           folderId: folder.id,
-          accessToken: undefined // Will be retrieved by workers if needed
+          accessToken // Now properly set!
         })
       }
 

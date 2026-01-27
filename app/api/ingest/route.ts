@@ -4,6 +4,7 @@ import { clerkClient } from "@clerk/nextjs/server"
 import { prisma } from "@/lib/prisma"
 import { listImagesRecursively, type DriveFile } from "@/lib/drive"
 import { queueFolderProcessing } from "@/lib/queue"
+import { encrypt } from "@/lib/encryption"
 
 // Get the maximum images limit from environment variable
 const getMaxImagesLimit = (): number | null => {
@@ -225,6 +226,9 @@ export async function POST(request: NextRequest) {
           totalImages: updatedTotalImages,
           processedImages: updatedProcessedImages,
           status: newStatus,
+          // Update token if new one is available
+          accessTokenEncrypted: token ? encrypt(token) : undefined,
+          tokenExpiresAt: token ? new Date(Date.now() + 55 * 60 * 1000) : undefined, // ~55 min
         },
       })
       
@@ -326,6 +330,9 @@ export async function POST(request: NextRequest) {
         status: "pending",
         totalImages: supportedImages.length, // Only count supported images
         userId: dbUserId,
+        // Store encrypted token for background processing
+        accessTokenEncrypted: token ? encrypt(token) : null,
+        tokenExpiresAt: token ? new Date(Date.now() + 55 * 60 * 1000) : null, // ~55 min
       },
     })
     
