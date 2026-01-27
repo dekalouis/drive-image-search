@@ -47,13 +47,12 @@ interface SearchResult {
   thumbnailLink: string
   webViewLink: string
   caption: string | null
-  tags: string | null
   similarity: number
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { folderId, query, topK = 12 } = await request.json()
+    const { folderId, query, topK = 12, searchType } = await request.json()
 
     if (!folderId || !query) {
       return NextResponse.json({ error: "folderId and query are required" }, { status: 400 })
@@ -68,8 +67,16 @@ export async function POST(request: NextRequest) {
 
     const trimmedQuery = query.trim()
     
-    // Check if query looks like a filename search (contains file extension or is short)
-    const isFilenameSearch = trimmedQuery.includes('.') || trimmedQuery.length < 3
+    // Determine search type: use provided searchType or fallback to auto-detection
+    let isFilenameSearch: boolean
+    if (searchType === 'semantic') {
+      isFilenameSearch = false
+    } else if (searchType === 'filename') {
+      isFilenameSearch = true
+    } else {
+      // Auto-detection: check if query looks like a filename search (contains file extension or is short)
+      isFilenameSearch = trimmedQuery.includes('.') || trimmedQuery.length < 3
+    }
     
     let results: SearchResult[] = []
     let searchTime = 0
@@ -91,7 +98,6 @@ export async function POST(request: NextRequest) {
           "thumbnailLink",
           "webViewLink",
           caption,
-          tags,
           CASE 
             WHEN LOWER(name) = LOWER(${trimmedQuery}) THEN 1.0
             WHEN LOWER(name) LIKE LOWER(${startsWithPattern}) THEN 0.8
@@ -143,7 +149,6 @@ export async function POST(request: NextRequest) {
           "thumbnailLink",
           "webViewLink",
           caption,
-          tags,
           1 - ("captionVec" <=> ${vectorString}::vector) as similarity
         FROM images
         WHERE "folderId" = ${folderId}
@@ -173,7 +178,6 @@ export async function POST(request: NextRequest) {
               "thumbnailLink",
               "webViewLink",
               caption,
-              tags,
               CASE 
                 WHEN LOWER(name) = LOWER(${trimmedQuery}) THEN 1.0
                 WHEN LOWER(name) LIKE LOWER(${startsWithPattern}) THEN 0.8
@@ -210,7 +214,6 @@ export async function POST(request: NextRequest) {
       thumbnailLink: result.thumbnailLink,
       webViewLink: result.webViewLink,
       caption: cleanCaption(result.caption),
-      tags: result.tags,
       similarity: Math.round(Number(result.similarity) * 1000) / 1000,
     }))
 

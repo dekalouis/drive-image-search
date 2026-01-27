@@ -1,14 +1,14 @@
 "use client"
 
-import { useEffect, useState, useCallback, useRef } from "react"
+import { useEffect, useState, useCallback } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { Search, Image as ImageIcon, Loader2, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink } from "lucide-react"
+import { Image as ImageIcon, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink, Loader2 } from "lucide-react"
 import { ImageCard, type ImageData } from "@/components/image-card"
+import { SearchBar } from "@/components/search-bar"
 import { Modal } from "@/components/ui/modal"
 import NextImage from "next/image"
 
@@ -41,9 +41,7 @@ export default function FolderPage() {
   
   const [folder, setFolder] = useState<Folder | null>(null)
   const [loading, setLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<Image[]>([])
-  const [searching, setSearching] = useState(false)
   const [retryingImages, setRetryingImages] = useState<Set<string>>(new Set())
   const [retryingAll, setRetryingAll] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -101,62 +99,10 @@ export default function FolderPage() {
     return () => clearInterval(interval)
   }, [folderId, fetchFolderData])
 
-  // Debounced search effect
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  
-  useEffect(() => {
-    // Clear previous timeout
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current)
-    }
-
-    // If search query is empty, clear results immediately
-    if (!searchQuery.trim()) {
-      setSearchResults([])
-      setSearching(false)
-      return
-    }
-
-    // Set loading state immediately
-    setSearching(true)
-
-    // Debounce search - wait 500ms after user stops typing
-    searchTimeoutRef.current = setTimeout(async () => {
-      try {
-        const response = await fetch("/api/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: searchQuery, folderId }),
-        })
-        
-        if (response.ok) {
-          const data = await response.json()
-          // Format results with proper typing
-          const formattedResults = data.results.map((result: { similarity: number; [key: string]: unknown }) => ({
-            ...result,
-            similarity: Math.round(result.similarity * 1000) / 1000, // Round to 3 decimal places
-          }))
-          setSearchResults(formattedResults)
-        }
-      } catch (error) {
-        console.error("Search error:", error)
-      } finally {
-        setSearching(false)
-      }
-    }, 500) // 500ms debounce delay
-
-    // Cleanup function
-    return () => {
-      if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current)
-      }
-    }
-  }, [searchQuery, folderId])
-
-  // Reset to first page when search changes
+  // Reset to first page when search results change
   useEffect(() => {
     setCurrentPage(1)
-  }, [searchQuery])
+  }, [searchResults])
 
   const handleRetryImage = async (imageId: string) => {
     setRetryingImages(prev => new Set(prev).add(imageId))
@@ -260,7 +206,7 @@ export default function FolderPage() {
   }
 
   // Pagination logic
-  const allImages = searchQuery ? searchResults : sortImages(folder?.images || [])
+  const allImages = searchResults.length > 0 ? searchResults : sortImages(folder?.images || [])
   const totalPages = Math.ceil(allImages.length / imagesPerPage)
   const startIndex = (currentPage - 1) * imagesPerPage
   const endIndex = startIndex + imagesPerPage
@@ -528,40 +474,11 @@ export default function FolderPage() {
             </CardContent>
           </Card>
 
-          {/* Search */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Search className="h-5 w-5" />
-                Search Images
-              </CardTitle>
-              <CardDescription>
-                Search through your images using natural language queries
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    placeholder="Search by description or filename (e.g., 'cat' or 'vacation.jpg')"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="flex-1 pr-10"
-                  />
-                  {searching && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                    </div>
-                  )}
-                </div>
-              </div>
-              {searchQuery && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  {searching ? "Searching..." : `Showing ${searchResults.length} result${searchResults.length !== 1 ? 's' : ''}`}
-                </p>
-              )}
-            </CardContent>
-          </Card>
+          {/* Search Bar Component */}
+          <SearchBar 
+            folderId={folderId}
+            onResultsChange={setSearchResults}
+          />
         </div>
 
         {/* Top Pagination */}
@@ -587,7 +504,9 @@ export default function FolderPage() {
           <div className="text-center py-12">
             <ImageIcon className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <p className="text-muted-foreground">
-              {searchQuery ? "No images found matching your search." : "No images in this folder."}
+              {searchResults.length === 0 && folder?.images && folder.images.length > 0
+                ? "No images found matching your search."
+                : "No images in this folder."}
             </p>
           </div>
         )}
