@@ -52,3 +52,15 @@ export function decrypt(encryptedText: string): string {
   decrypted = Buffer.concat([decrypted, decipher.final()])
   return decrypted.toString()
 }
+
+/**
+ * Check if a token has expired or is about to expire
+ * @param expiresAt Token expiration timestamp
+ * @param bufferMinutes Buffer time before expiry to consider token expired (default: 5 minutes)
+ * @returns true if token is expired or about to expire
+ */
+export function isTokenExpired(expiresAt: Date | null, bufferMinutes: number = 5): boolean {
+  if (!expiresAt) return true
+  const bufferMs = bufferMinutes * 60 * 1000
+  return new Date() >= new Date(expiresAt.getTime() - bufferMs)
+}

@@ -4,6 +4,7 @@ import { clerkClient } from "@clerk/nextjs/server"
 import { prisma } from "@/lib/prisma"
 import { listImagesRecursively, type DriveFile } from "@/lib/drive"
 import { queueFolderProcessing } from "@/lib/queue"
+import { validateFolderAccess } from "@/lib/folder-auth"
 
 // Get the maximum images limit from environment variable
 const getMaxImagesLimit = (): number | null => {
@@ -43,13 +44,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "folderId is required" }, { status: 400 })
     }
 
-    // Get folder from database
-    const folder = await prisma.folder.findUnique({
-      where: { id: folderId },
-    })
+    // Validate folder access (ownership)
+    const { folder, hasAccess } = await validateFolderAccess(folderId)
 
     if (!folder) {
       return NextResponse.json({ error: "Folder not found" }, { status: 404 })
+    }
+
+    if (!hasAccess) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 })
     }
 
     console.log(`🔄 Syncing folder: ${folder.name || folder.folderId}`)

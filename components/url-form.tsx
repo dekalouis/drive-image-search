@@ -135,7 +135,7 @@ export function UrlForm({ onSuccess }: UrlFormProps) {
               }
             </p>
             <p>
-              <span className="font-semibold text-foreground">Image limit:</span> Folders with up to 1,000 images are supported. Folders with more than 100 images need time to process.
+              <span className="font-semibold text-foreground">Image limit:</span> Folders with up to {process.env.NEXT_PUBLIC_MAX_IMAGES_PER_FOLDER || '200'} images are supported. Folders with more than 100 images need time to process.
             </p>
           </div>
         </div>

@@ -4,6 +4,7 @@ import { clerkClient } from "@clerk/nextjs/server"
 import { prisma } from "@/lib/prisma"
 import { imageQueue, queueImageBatch } from "@/lib/queue"
 import { decrypt } from "@/lib/encryption"
+import { validateFolderAccess } from "@/lib/folder-auth"
 
 export async function POST(request: NextRequest) {
   try {
@@ -55,6 +56,15 @@ export async function POST(request: NextRequest) {
         )
       }
 
+      // Validate access to the folder containing this image
+      const { hasAccess } = await validateFolderAccess(image.folderId)
+      if (!hasAccess) {
+        return NextResponse.json(
+          { error: "Access denied" },
+          { status: 403 }
+        )
+      }
+
       // Reset image status to pending using raw SQL (captionVec is an Unsupported type)
       await prisma.$executeRaw`
         UPDATE images 
@@ -83,20 +93,20 @@ export async function POST(request: NextRequest) {
       // Retry all failed AND pending images in folder
       console.log(`🔄 Retrying all failed and pending images in folder: ${folderId}`)
       
-      const folder = await prisma.folder.findUnique({
-        where: { id: folderId },
-        select: { 
-          id: true, 
-          status: true,
-          accessTokenEncrypted: true,
-          tokenExpiresAt: true
-        }
-      })
+      // Validate folder access
+      const { folder, hasAccess } = await validateFolderAccess(folderId)
 
       if (!folder) {
         return NextResponse.json(
           { error: "Folder not found" },
           { status: 404 }
+        )
+      }
+
+      if (!hasAccess) {
+        return NextResponse.json(
+          { error: "Access denied" },
+          { status: 403 }
         )
       }
 
