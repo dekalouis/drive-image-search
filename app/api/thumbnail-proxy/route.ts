@@ -7,8 +7,36 @@ import { prisma } from "@/lib/prisma"
 // In-memory cache for thumbnail URLs (simple TTL cache)
 const thumbnailCache = new Map<string, { url: string; expiresAt: number }>()
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000 // 2 hours
+let accessesSinceCleanup = 0
+const CLEANUP_INTERVAL = 100 // Clean every 100 accesses
+
+function cleanupExpiredEntries() {
+  const now = Date.now()
+  let cleaned = 0
+  const maxCleanupBatch = 100
+  
+  for (const [key, value] of thumbnailCache.entries()) {
+    if (value.expiresAt < now) {
+      thumbnailCache.delete(key)
+      cleaned++
+      if (cleaned >= maxCleanupBatch) break
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`🧹 Thumbnail cache cleanup: removed ${cleaned} expired entries (total: ${thumbnailCache.size})`)
+  }
+}
 
 function getCachedThumbnailUrl(fileId: string, size: number): string | null {
+  accessesSinceCleanup++
+  
+  // Periodic cleanup
+  if (accessesSinceCleanup >= CLEANUP_INTERVAL) {
+    cleanupExpiredEntries()
+    accessesSinceCleanup = 0
+  }
+  
   const cacheKey = `${fileId}-${size}`
   const cached = thumbnailCache.get(cacheKey)
   
@@ -30,16 +58,6 @@ function setCachedThumbnailUrl(fileId: string, size: number, url: string): void 
     url,
     expiresAt: Date.now() + CACHE_TTL_MS,
   })
-  
-  // Clean up old entries if cache gets too large (> 10000 entries)
-  if (thumbnailCache.size > 10000) {
-    const now = Date.now()
-    for (const [key, value] of thumbnailCache.entries()) {
-      if (value.expiresAt < now) {
-        thumbnailCache.delete(key)
-      }
-    }
-  }
 }
 
 export async function GET(request: NextRequest) {

@@ -15,10 +15,9 @@ async function main() {
 
     const result = await captionImage(fileId, mimeType)
     console.log("\nCaption:", result.caption)
-    console.log("Tags:", result.tags)
 
     console.log("\nGenerating embedding...")
-    const embedding = await generateCaptionEmbedding(result.caption, result.tags)
+    const embedding = await generateCaptionEmbedding(result.caption)
     console.log(`Embedding dimensions: ${embedding.length}`)
     console.log(`First 5 values: [${embedding.slice(0, 5).join(", ")}]`)
 

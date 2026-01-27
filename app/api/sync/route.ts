@@ -4,6 +4,9 @@ import { clerkClient } from "@clerk/nextjs/server"
 import { prisma } from "@/lib/prisma"
 import { listImagesRecursively, type DriveFile } from "@/lib/drive"
 import { queueFolderProcessing } from "@/lib/queue"
+import { validateFolderAccess } from "@/lib/folder-auth"
+import { decrypt, isTokenExpired } from "@/lib/encryption"
+import { folderRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
 // Get the maximum images limit from environment variable
 const getMaxImagesLimit = (): number | null => {
@@ -16,6 +19,26 @@ const getMaxImagesLimit = (): number | null => {
 
 export async function POST(request: NextRequest) {
   try {
+    // Rate limiting
+    const identifier = getClientIdentifier(request)
+    const rateLimitResult = await checkRateLimit(folderRateLimiter, identifier)
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000)
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getRateLimitHeaders(rateLimitResult, 30),
+            'Retry-After': Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const { userId } = await auth()
     
     // Try to get Google OAuth token from SSO connection (optional - will be null if user hasn't connected Google)
@@ -28,12 +51,11 @@ export async function POST(request: NextRequest) {
           token = tokenResponse.data[0].token
           console.log("✅ Google OAuth token retrieved successfully from SSO connection")
         } else {
-          console.log("ℹ️ No Google OAuth token available, will use API key for public folders")
+          console.log("ℹ️ No Google OAuth token available, will try stored token")
         }
       } catch {
         // Token not available - user hasn't connected Google OAuth yet
-        // This is fine, we'll use API key for public folders
-        console.log("ℹ️ No Google OAuth token available, will use API key for public folders")
+        console.log("ℹ️ No Google OAuth token available, will try stored token")
       }
     }
     
@@ -43,13 +65,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "folderId is required" }, { status: 400 })
     }
 
-    // Get folder from database
-    const folder = await prisma.folder.findUnique({
-      where: { id: folderId },
-    })
+    // Validate folder access (ownership)
+    const { folder, hasAccess } = await validateFolderAccess(folderId)
 
     if (!folder) {
       return NextResponse.json({ error: "Folder not found" }, { status: 404 })
+    }
+
+    if (!hasAccess) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 })
+    }
+
+    // If no token from current user, try stored token from folder
+    if (!token && folder.accessTokenEncrypted && folder.tokenExpiresAt) {
+      if (!isTokenExpired(folder.tokenExpiresAt)) {
+        try {
+          token = decrypt(folder.accessTokenEncrypted)
+          console.log("🔑 Using stored token for sync")
+        } catch (e) {
+          console.warn("⚠️ Failed to decrypt stored token for sync:", e instanceof Error ? e.message : String(e))
+        }
+      } else {
+        console.warn("⚠️ Stored token expired for sync")
+      }
     }
 
     console.log(`🔄 Syncing folder: ${folder.name || folder.folderId}`)

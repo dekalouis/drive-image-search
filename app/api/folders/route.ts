@@ -1,9 +1,30 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { auth, currentUser } from "@clerk/nextjs/server"
 import { prisma } from "@/lib/prisma"
+import { folderRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
 export async function GET(request: NextRequest) {
   try {
+    // Rate limiting
+    const identifier = getClientIdentifier(request)
+    const rateLimitResult = await checkRateLimit(folderRateLimiter, identifier)
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000)
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getRateLimitHeaders(rateLimitResult, 30),
+            'Retry-After': Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const { userId: clerkId } = await auth()
 
     if (!clerkId) {
