@@ -14,7 +14,6 @@ async function checkFolderStatus(folderId: string) {
             name: true,
             status: true,
             caption: true,
-            tags: true,
             error: true
           }
         }

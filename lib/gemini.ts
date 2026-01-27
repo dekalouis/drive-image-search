@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai"
+import sharp from "sharp"
 import { getDownloadUrl, getAuthenticatedDownloadUrl, getDriveClient } from "@/lib/drive"
 
 // Initialize Gemini AI client
@@ -121,23 +122,41 @@ async function downloadImage(fileId: string, accessToken?: string): Promise<Buff
   return downloadWithRetry(fileId, 3, accessToken)
 }
 
-// Optimized structured prompt for semantic search - targets 120-200 tokens output
-const STRUCTURED_CAPTION_PROMPT = `You are generating search-ready captions for an image dataset.
-Return structured MARKDOWN with these sections (omit section only if completely empty):
+// Resize image for AI processing to reduce token usage and improve speed
+async function resizeImageForAI(imageBuffer: Buffer): Promise<Buffer> {
+  try {
+    const resizeStart = Date.now()
+    
+    // Use sharp to resize image to max 1024px on longest side while maintaining aspect ratio
+    const resized = await sharp(imageBuffer)
+      .resize(1024, 1024, {
+        fit: 'inside', // Maintain aspect ratio, fit within 1024x1024
+        withoutEnlargement: true // Don't upscale smaller images
+      })
+      .toFormat('jpeg', { quality: 80 }) // Use JPEG with 80% quality for best compression
+      .toBuffer()
+    
+    const resizeTime = Date.now() - resizeStart
+    const originalSize = imageBuffer.length
+    const resizedSize = resized.length
+    const savingsPercent = ((originalSize - resizedSize) / originalSize * 100).toFixed(1)
+    
+    console.log(`🖼️  Image resized in ${resizeTime}ms: ${originalSize} → ${resizedSize} bytes (${savingsPercent}% reduction)`)
+    
+    return resized
+  } catch (error) {
+    console.warn('Failed to resize image, using original:', error instanceof Error ? error.message : String(error))
+    return imageBuffer
+  }
+}
 
-1. **Subjects & Objects:** list every distinct person, object, brand, animal, product, or UI element. Include counts, colors, positions (e.g., "two golden retrievers sitting on a red sofa").
-2. **Actions & Interactions:** describe what each subject is doing, including gestures, emotions, gaze, and relationships.
-3. **Setting & Context:** indoor/outdoor, environment type, time of day/lighting, weather, notable background elements.
-4. **Visual Attributes:** colors, textures, materials, camera angle, depth-of-field, style (photo, illustration, screenshot, UI mock, chart, etc.).
-5. **Visible Text (OCR):** quote any readable words, signage, UI labels, packaging text exactly.
-6. **Notable Details:** rare logos, devices, clothing, accessories, body language, mood, any anomalies.
-7. **Search Keywords:** comma-separated list of 10-15 high-signal terms (nouns, verbs, styles, brands) to aid embedding.
-
-Guidelines:
-- Be exhaustive but concise—aim for 120-200 tokens total.
-- Use neutral, descriptive language; avoid speculation.
-- When unsure, say "uncertain" rather than hallucinating.
-- Do NOT mention "section omitted" or anything outside the format above.`
+// Optimized dense prompt for faster processing and better embeddings - targets 100-150 tokens output
+const DENSE_CAPTION_PROMPT = `Describe this image in a single dense paragraph for search indexing.
+Include: all subjects/objects with counts and colors, actions and interactions,
+setting (indoor/outdoor, environment, lighting), visual style (photo/illustration/screenshot),
+any readable text or logos exactly as written, and notable details.
+End with a comma-separated keyword list of 10-15 search terms.
+Be exhaustive but concise. 100-150 tokens max. Neutral language. Say "uncertain" if unsure.`
 
 // Caption an image using Gemini 2.5 Flash with comprehensive analysis
 export async function captionImage(
@@ -146,7 +165,6 @@ export async function captionImage(
   accessToken?: string
 ): Promise<{
   caption: string
-  tags: string[]
 }> {
   const genAI = getGeminiClient()
   // Use gemini-2.5-flash for best captioning quality
@@ -160,14 +178,17 @@ export async function captionImage(
     const downloadTime = Date.now() - downloadStart
     console.log(`⏱️  Download time for ${fileId}: ${downloadTime}ms`)
 
-    // Generate content with comprehensive prompt
+    // Resize image for AI processing to reduce token usage and improve speed
+    const resizedBuffer = await resizeImageForAI(imageBuffer)
+
+    // Generate content with dense prompt
     const aiStart = Date.now()
     const result = await model.generateContent([
-      STRUCTURED_CAPTION_PROMPT,
+      DENSE_CAPTION_PROMPT,
       {
         inlineData: {
-          data: imageBuffer.toString("base64"),
-          mimeType,
+          data: resizedBuffer.toString("base64"),
+          mimeType: "image/jpeg", // Always use JPEG after resize
         },
       },
     ])
@@ -177,72 +198,41 @@ export async function captionImage(
     const response = await result.response
     const text = response.text()
 
-    // Parse markdown response and extract caption + tags
+    // Parse flat text response and extract caption only
     try {
       const cleanedText = text.trim()
+      const lines = cleanedText.split('\n').filter(line => line.trim().length > 0)
 
-      // Extract Search Keywords section for tags
-      const tags: string[] = []
-      const keywordsMatch = cleanedText.match(/\*\*Search Keywords:\*\*\s*([^\n*]+)/i)
-      if (keywordsMatch) {
-        const keywords = keywordsMatch[1]
-          .split(',')
-          .map(k => k.trim().toLowerCase().replace(/\s+/g, '-'))
-          .filter(k => k.length > 0 && k.length <= 30)
-        tags.push(...keywords)
+      if (lines.length === 0) {
+        throw new Error("Empty response from AI")
       }
 
-      // Also extract keywords from other sections for richer tagging
-      const subjectsMatch = cleanedText.match(/\*\*Subjects & Objects:\*\*\s*([^\n*]+)/i)
-      if (subjectsMatch) {
-        const subjects = subjectsMatch[1]
-          .split(',')
-          .slice(0, 5)
-          .map(s => s.trim().toLowerCase().replace(/\s+/g, '-'))
-          .filter(s => s.length > 0 && s.length <= 30)
-        tags.push(...subjects)
-      }
-
-      // Build caption from the full markdown (without the Search Keywords line for cleaner display)
+      // Entire response is the caption (including the last line which now just has keywords we'll ignore)
       const caption = cleanedText
-        .replace(/\*\*Search Keywords:\*\*[^\n]*/gi, '') // Remove keywords line
-        .replace(/\*\*/g, '') // Remove bold markers
-        .replace(/^\d+\.\s*/gm, '') // Remove numbered list markers
-        .replace(/\n{2,}/g, ' ') // Collapse multiple newlines
-        .replace(/\s+/g, ' ') // Normalize whitespace
+        .split('\n')
+        .slice(0, -1) // Remove last line (keyword list)
+        .join(' ')
         .trim()
-        .substring(0, 1500) // Limit for embedding efficiency
 
-      // Clean and deduplicate tags
-      const cleanedTags = [...new Set(
-        tags
-          .filter((tag): tag is string => typeof tag === 'string' && tag.length > 0)
-          .filter(tag => tag.length > 0 && tag.length <= 30)
-      )].slice(0, 20) // Allow more tags for richer search
+      // Ensure we have non-empty caption
+      const finalCaption = caption.substring(0, 1500) || cleanedText.substring(0, 1500)
 
-      console.log(`📝 Generated caption for ${fileId}: ${caption.substring(0, 100)}...`)
-      console.log(`🏷️  Generated ${cleanedTags.length} tags for ${fileId}`)
+      console.log(`📝 Generated caption for ${fileId}: ${finalCaption.substring(0, 100)}...`)
 
-      return { caption, tags: cleanedTags }
+      return { caption: finalCaption }
     } catch (parseError) {
       // Fallback: use raw text as caption
-      console.warn("Failed to parse markdown response, using fallback:", parseError)
+      console.warn("Failed to parse response, using fallback:", parseError)
       console.warn("Raw response (first 500 chars):", text.substring(0, 500))
 
       const fallbackCaption = text
-        .replace(/\*\*/g, '')
+        .replace(/\n+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
         .substring(0, 500)
 
-      // Extract potential keywords from the text
-      const wordPattern = /\b[a-zA-Z]{3,15}\b/g
-      const words = fallbackCaption.match(wordPattern) || []
-      const fallbackTags = [...new Set(words.map(w => w.toLowerCase()))].slice(0, 10)
-
       return {
         caption: fallbackCaption || "Image content",
-        tags: fallbackTags.length > 0 ? fallbackTags : ["image", "content"]
       }
     }
   } catch (error) {
@@ -283,12 +273,57 @@ export async function generateTextEmbedding(text: string, normalize: boolean = t
   }
 }
 
-// Generate embeddings for both caption and tags
-export async function generateCaptionEmbedding(caption: string, tags: string[]): Promise<number[]> {
-  // Combine caption and tags for richer semantic representation
-  const combinedText = `${caption} ${tags.join(" ")}`
-  // Normalization is applied inside generateTextEmbedding
-  return generateTextEmbedding(combinedText, true)
+// Generate embeddings for caption only
+export async function generateCaptionEmbedding(caption: string): Promise<number[]> {
+  // Use caption only for embedding
+  return generateTextEmbedding(caption, true)
+}
+
+// Generate batch embeddings for multiple texts in a single API call
+export async function generateBatchEmbeddings(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) {
+    return []
+  }
+
+  const genAI = getGeminiClient()
+  const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
+
+  try {
+    const batchStart = Date.now()
+    console.log(`📦 Generating batch embeddings for ${texts.length} texts`)
+
+    // Check if SDK supports batchEmbedContents
+    const modelWithBatch = model as unknown as { batchEmbedContents?: (config: unknown) => Promise<{ embeddings: Array<{ values: number[] }> }> }
+    if (modelWithBatch.batchEmbedContents) {
+      // Use batchEmbedContents if available
+      const requests = texts.map(text => ({
+        content: { parts: [{ text: normalizeTextForEmbedding(text) }] }
+      }))
+
+      const batchResult = await modelWithBatch.batchEmbedContents({
+        requests
+      })
+
+      const batchTime = Date.now() - batchStart
+      console.log(`⏱️  Batch embedding time for ${texts.length} texts: ${batchTime}ms`)
+
+      return batchResult.embeddings.map((embedding) => embedding.values)
+    } else {
+      // Fallback to Promise.all with individual calls if batch API not available
+      console.log(`⚠️  Batch API not available, using Promise.all with individual calls`)
+      const embeddings = await Promise.all(
+        texts.map(text => generateTextEmbedding(text, true))
+      )
+
+      const batchTime = Date.now() - batchStart
+      console.log(`⏱️  Promise.all embedding time for ${texts.length} texts: ${batchTime}ms`)
+
+      return embeddings
+    }
+  } catch (error) {
+    console.error("Batch embedding generation error:", error)
+    throw new Error(`Failed to generate batch embeddings: ${error instanceof Error ? error.message : "Unknown error"}`)
+  }
 }
 
 // Fast tags-only image analysis using Gemini (optimized for quick processing)

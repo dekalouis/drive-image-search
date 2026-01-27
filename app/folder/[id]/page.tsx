@@ -21,7 +21,6 @@ interface Image {
   webViewLink: string
   status: string
   caption?: string
-  tags?: string
   similarity?: number
 }
 
@@ -643,19 +642,6 @@ export default function FolderPage() {
               </div>
             )}
 
-            {/* Tags */}
-            {selectedImage.tags && (
-              <div className="space-y-2">
-                <h3 className="font-semibold text-foreground">Tags</h3>
-                <div className="flex flex-wrap gap-2">
-                  {selectedImage.tags.split(',').map((tag, index) => (
-                    <Badge key={index} variant="outline" className="text-xs">
-                      {tag.trim()}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Open in Drive button */}
             {selectedImage.webViewLink && (

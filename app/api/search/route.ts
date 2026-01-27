@@ -48,7 +48,6 @@ interface SearchResult {
   thumbnailLink: string
   webViewLink: string
   caption: string | null
-  tags: string | null
   similarity: number
 }
 
@@ -113,7 +112,6 @@ export async function POST(request: NextRequest) {
           "thumbnailLink",
           "webViewLink",
           caption,
-          tags,
           CASE 
             WHEN LOWER(name) = LOWER(${trimmedQuery}) THEN 1.0
             WHEN LOWER(name) LIKE LOWER(${startsWithPattern}) THEN 0.8
@@ -165,7 +163,6 @@ export async function POST(request: NextRequest) {
           "thumbnailLink",
           "webViewLink",
           caption,
-          tags,
           1 - ("captionVec" <=> ${vectorString}::vector) as similarity
         FROM images
         WHERE "folderId" = ${folderId}
@@ -196,7 +193,6 @@ export async function POST(request: NextRequest) {
               "thumbnailLink",
               "webViewLink",
               caption,
-              tags,
               CASE 
                 WHEN LOWER(name) = LOWER(${trimmedQuery}) THEN 1.0
                 WHEN LOWER(name) LIKE LOWER(${startsWithPattern}) THEN 0.8
@@ -233,7 +229,6 @@ export async function POST(request: NextRequest) {
       thumbnailLink: result.thumbnailLink,
       webViewLink: result.webViewLink,
       caption: cleanCaption(result.caption),
-      tags: result.tags,
       similarity: Math.round(Number(result.similarity) * 1000) / 1000,
     }))
 

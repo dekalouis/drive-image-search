@@ -58,7 +58,6 @@ model Image {
   etag          String?   // or 'version'/'rev' from Drive
   status        String    // 'pending' | 'processing' | 'completed' | 'failed'
   caption       String?
-  tags          String?   // comma-separated
   captionVec    Unsupported("vector(768)")? // Native pgvector for fast similarity search
   error         String?
   createdAt     DateTime  @default(now())

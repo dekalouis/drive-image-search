@@ -90,7 +90,6 @@ export async function GET(request: NextRequest) {
         webViewLink: true,
         status: true,
         caption: true,
-        tags: true,
         error: true,
         createdAt: true,
       },

@@ -2,7 +2,7 @@ import { Worker, type Job } from "bullmq"
 import IORedis from "ioredis"
 import { prisma } from "@/lib/prisma"
 import { ensureCaptionVectorIndex } from "@/lib/db-init"
-import { captionImage, generateCaptionEmbedding, geminiRateLimiter } from "@/lib/gemini"
+import { captionImage, generateCaptionEmbedding, generateBatchEmbeddings, geminiRateLimiter } from "@/lib/gemini"
 import type { FolderJobData, ImageJobData, ImageBatchJobData } from "@/lib/queue"
 import { queueImageBatch } from "@/lib/queue"
 
@@ -246,6 +246,128 @@ export const folderWorker = new Worker(
   },
 )
 
+// Helper function to generate caption for a single image
+async function processImageCaption(image: { imageId: string, fileId: string, etag: string, folderId: string, mimeType?: string, name?: string, accessToken?: string }): Promise<{ success: boolean; imageId: string; fileId: string; caption?: string; error?: string }> {
+  const { imageId, fileId, mimeType: providedMimeType, accessToken } = image
+  
+  try {
+    // Get image mime type if not provided
+    let mimeType = providedMimeType
+    if (!mimeType) {
+      const dbImage = await prisma.image.findUnique({
+        where: { id: imageId },
+        select: { mimeType: true },
+      })
+      if (dbImage) {
+        mimeType = dbImage.mimeType
+      }
+    }
+
+    if (!mimeType) {
+      throw new Error("Image MIME type not found")
+    }
+
+    // Rate limiting for Gemini
+    await geminiRateLimiter.waitIfNeeded()
+
+    // Generate caption only
+    const { caption } = await captionImage(fileId, mimeType, accessToken)
+
+    return {
+      success: true,
+      imageId,
+      fileId,
+      caption,
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return {
+      success: false,
+      imageId,
+      fileId,
+      error: errorMessage,
+    }
+  }
+}
+
+// Helper function to generate embedding for a caption and store it
+async function processImageEmbedding(imageId: string, folderId: string, caption: string, embedding: number[]) {
+  try {
+    // Update image with results - try with pgvector, fallback to regular update if unavailable
+    const dbUpdateStart = Date.now()
+    try {
+      // Ensure pgvector + HNSW index exist before we attempt to persist embeddings
+      await ensureCaptionVectorIndex()
+
+      // Update with vector embedding using raw SQL for pgvector
+      const vectorString = `[${embedding.join(',')}]`
+      await prisma.$executeRaw`
+        UPDATE images 
+        SET 
+          status = 'completed',
+          caption = ${caption},
+          "captionVec" = ${vectorString}::vector,
+          "updatedAt" = NOW()
+        WHERE id = ${imageId}
+      `
+    } catch (error: any) {
+      // If pgvector is not available, save without embedding
+      const errorMessage = error?.message || String(error)
+      if (errorMessage.includes('pgvector') || errorMessage.includes('vector') || errorMessage.includes('extension')) {
+        console.warn(`⚠️  pgvector not available for ${imageId}, saving without embedding: ${errorMessage}`)
+        
+        // Fallback: Update without vector embedding
+        await prisma.image.update({
+          where: { id: imageId },
+          data: {
+            status: 'completed',
+            caption,
+            updatedAt: new Date(),
+          },
+        })
+      } else {
+        // Re-throw non-pgvector errors
+        throw error
+      }
+    }
+    const dbUpdateTime = Date.now() - dbUpdateStart
+
+    // Update folder progress
+    await updateFolderProgress(folderId)
+
+    return {
+      success: true,
+      imageId,
+      dbUpdateTime
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    console.error(`❌ Failed to store embedding for ${imageId}: ${errorMessage}`)
+
+    // Update progress even for failed images
+    const currentProgress = folderProgress.get(folderId)
+    if (currentProgress) {
+      currentProgress.processedImages += 1
+      folderProgress.set(folderId, currentProgress)
+    }
+
+    // Update database to mark image as failed
+    await prisma.image.update({
+      where: { id: imageId },
+      data: { 
+        status: 'failed',
+        error: errorMessage.substring(0, 500)
+      }
+    })
+
+    return {
+      success: false,
+      imageId,
+      error: errorMessage,
+    }
+  }
+}
+
 // Helper function to process a single image (used inside batch or single job)
 async function processImage(image: { imageId: string, fileId: string, etag: string, folderId: string, mimeType?: string, name?: string, accessToken?: string }) {
   const { imageId, fileId, etag, folderId, accessToken } = image
@@ -254,6 +376,25 @@ async function processImage(image: { imageId: string, fileId: string, etag: stri
   console.log(`🚀 Starting image processing: ${fileId} (etag: ${etag})`)
 
   try {
+    // ETag-based deduplication: Skip if image already processed and unchanged
+    const existingImage = await prisma.image.findUnique({
+      where: { id: imageId },
+      select: { status: true, etag: true, caption: true }
+    })
+
+    if (existingImage?.status === 'completed' && existingImage.etag === etag && existingImage.caption) {
+      console.log(`⏭️  Skipping unchanged image: ${fileId} (etag: ${etag})`)
+      
+      // Still update progress tracking
+      const currentProgress = folderProgress.get(folderId)
+      if (currentProgress) {
+        currentProgress.processedImages += 1
+        folderProgress.set(folderId, currentProgress)
+      }
+      
+      return { success: true, skipped: true, imageId }
+    }
+
     // Update image status to processing (skip if batch, as it adds overhead, but safer for tracking)
     await prisma.image.update({
       where: { id: imageId },
@@ -306,18 +447,17 @@ async function processImage(image: { imageId: string, fileId: string, etag: stri
     // Rate limiting
     await geminiRateLimiter.waitIfNeeded()
 
-    // Generate extensive caption and tags using full image analysis (or large thumbnail)
+    // Generate caption using full image analysis
     const captioningStart = Date.now()
-    const { caption, tags } = await captionImage(fileId, mimeType, accessToken)
+    const { caption } = await captionImage(fileId, mimeType, accessToken)
     const captioningTime = Date.now() - captioningStart
 
-    console.log(`📝 Generated extensive caption for ${name}`)
-    console.log(`🏷️  Generated ${tags.length} tags`)
+    console.log(`📝 Generated caption for ${name}`)
     console.log(`⏱️  Captioning time: ${captioningTime}ms`)
 
     // Generate embedding for the caption
     const embeddingStart = Date.now()
-    const embedding = await generateCaptionEmbedding(caption, tags)
+    const embedding = await generateCaptionEmbedding(caption)
     const embeddingTime = Date.now() - embeddingStart
 
     // Update image with results - try with pgvector, fallback to regular update if unavailable
@@ -333,7 +473,6 @@ async function processImage(image: { imageId: string, fileId: string, etag: stri
         SET 
           status = 'completed',
           caption = ${caption},
-          tags = ${tags.join(",")},
           "captionVec" = ${vectorString}::vector,
           "updatedAt" = NOW()
         WHERE id = ${imageId}
@@ -350,7 +489,6 @@ async function processImage(image: { imageId: string, fileId: string, etag: stri
           data: {
             status: 'completed',
             caption,
-            tags: tags.join(","),
             updatedAt: new Date(),
           },
         })
@@ -429,27 +567,70 @@ export const imageWorker = new Worker(
     console.log(`🎯 Image worker received job: ${job.id} (${job.name})`)
     
     if (job.name === 'batch-caption') {
-      // Process batch of images
+      // Process batch of images with optimized two-phase approach
       const { images, folderId, accessToken } = job.data as ImageBatchJobData
       console.log(`📦 Processing batch of ${images.length} images for folder ${folderId}`)
       
-      // Process all images in parallel
-      // processImage now returns results instead of throwing, so we can use Promise.all
-      const results = await Promise.all(images.map(img => processImage({ ...img, accessToken })))
+      const batchStart = Date.now()
       
-      const successCount = results.filter(r => r.success === true).length
-      const failCount = results.filter(r => r.success === false).length
+      // Phase 1: Generate captions in parallel
+      console.log(`📝 Phase 1: Generating captions for ${images.length} images`)
+      const captionResults = await Promise.all(
+        images.map(img => processImageCaption({ ...img, accessToken }))
+      )
       
-      console.log(`✅ Batch completed: ${successCount} successful, ${failCount} failed`)
+      const captionTime = Date.now() - batchStart
+      console.log(`⏱️  Caption generation time: ${captionTime}ms`)
       
-      // Log any failures for debugging
-      if (failCount > 0) {
-        const failures = results.filter(r => r.success === false)
-        console.log(`❌ Failed images in batch:`)
-        failures.forEach(f => console.log(`   - ${f.fileId}: ${f.error || 'Unknown error'}`))
+      // Phase 2: Batch generate embeddings for successful captions
+      const successfulCaptions = captionResults.filter((r): r is typeof captionResults[0] & { caption: string } => 
+        r.success && r.caption !== undefined
+      )
+      if (successfulCaptions.length > 0) {
+        console.log(`🧮 Phase 2: Generating ${successfulCaptions.length} batch embeddings`)
+        
+        const textsToEmbed = successfulCaptions.map(r => r.caption)
+        const embeddings = await generateBatchEmbeddings(textsToEmbed)
+        
+        const embeddingTime = Date.now() - batchStart - captionTime
+        console.log(`⏱️  Batch embedding time: ${embeddingTime}ms`)
+        
+        // Phase 3: Store embeddings in database
+        console.log(`💾 Phase 3: Storing ${successfulCaptions.length} embeddings`)
+        
+        const storageResults = await Promise.all(
+          successfulCaptions.map((result, idx) => 
+            processImageEmbedding(result.imageId, folderId, result.caption, embeddings[idx])
+          )
+        )
+        
+        const storageTime = Date.now() - batchStart - captionTime - embeddingTime
+        console.log(`⏱️  Storage time: ${storageTime}ms`)
+        
+        // Track failures from embedding phase
+        const storageFailures = storageResults.filter(r => !r.success)
+        
+        // Count totals
+        const failedCaptions = captionResults.length - successfulCaptions.length
+        const totalFailed = failedCaptions + storageFailures.length
+        const totalSuccess = successfulCaptions.length - storageFailures.length
+        
+        console.log(`✅ Batch completed: ${totalSuccess} successful, ${totalFailed} failed (${Date.now() - batchStart}ms total)`)
+        
+        if (totalFailed > 0) {
+          console.log(`❌ Failed images in batch:`)
+          captionResults.filter(r => !r.success).forEach(f => console.log(`   Caption failure - ${f.fileId}: ${f.error}`))
+          storageFailures.forEach(f => console.log(`   Storage failure - ${f.imageId}: ${f.error}`))
+        }
+        
+        return { success: true, processed: totalSuccess, failed: totalFailed }
+      } else {
+        // All captions failed
+        const failCount = captionResults.filter(r => !r.success).length
+        console.log(`✅ Batch completed: 0 successful, ${failCount} failed (all caption generation failed)`)
+        
+        return { success: false, processed: 0, failed: failCount }
       }
-      
-      return { success: true, processed: successCount, failed: failCount }
       
     } else {
       // Process single image (legacy/retry)

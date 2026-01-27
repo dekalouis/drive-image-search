@@ -15,7 +15,6 @@ export interface ImageData {
     webViewLink: string
     status: string
     caption?: string
-    tags?: string
     similarity?: number
   }
 
@@ -227,20 +226,6 @@ export function ImageCard({ image, onRetry, retryingImages, onSelect }: ImageCar
           </p>
         )}
         
-        {image.tags && (
-          <div className="flex flex-wrap gap-1 mt-2">
-            {image.tags.split(',').slice(0, 3).map((tag, index) => (
-              <Badge key={index} variant="outline" className="text-xs">
-                {tag.trim()}
-              </Badge>
-            ))}
-            {image.tags.split(',').length > 3 && (
-              <Badge variant="outline" className="text-xs">
-                +{image.tags.split(',').length - 3}
-              </Badge>
-            )}
-          </div>
-        )}
       </CardContent>
     </Card>
   )
