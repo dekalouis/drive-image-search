@@ -251,6 +251,8 @@ export function FolderList({ refreshTrigger }: FolderListProps = {}) {
     switch (status) {
       case "completed":
         return "bg-green-500"
+      case "completed_with_errors":
+        return "bg-orange-500"
       case "processing":
         return "bg-yellow-500"
       case "failed":

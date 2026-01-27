@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma"
 import { listImagesRecursively, type DriveFile } from "@/lib/drive"
 import { queueFolderProcessing } from "@/lib/queue"
 import { validateFolderAccess } from "@/lib/folder-auth"
+import { decrypt, isTokenExpired } from "@/lib/encryption"
 
 // Get the maximum images limit from environment variable
 const getMaxImagesLimit = (): number | null => {
@@ -29,12 +30,11 @@ export async function POST(request: NextRequest) {
           token = tokenResponse.data[0].token
           console.log("✅ Google OAuth token retrieved successfully from SSO connection")
         } else {
-          console.log("ℹ️ No Google OAuth token available, will use API key for public folders")
+          console.log("ℹ️ No Google OAuth token available, will try stored token")
         }
       } catch {
         // Token not available - user hasn't connected Google OAuth yet
-        // This is fine, we'll use API key for public folders
-        console.log("ℹ️ No Google OAuth token available, will use API key for public folders")
+        console.log("ℹ️ No Google OAuth token available, will try stored token")
       }
     }
     
@@ -53,6 +53,20 @@ export async function POST(request: NextRequest) {
 
     if (!hasAccess) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 })
+    }
+
+    // If no token from current user, try stored token from folder
+    if (!token && folder.accessTokenEncrypted && folder.tokenExpiresAt) {
+      if (!isTokenExpired(folder.tokenExpiresAt)) {
+        try {
+          token = decrypt(folder.accessTokenEncrypted)
+          console.log("🔑 Using stored token for sync")
+        } catch (e) {
+          console.warn("⚠️ Failed to decrypt stored token for sync:", e instanceof Error ? e.message : String(e))
+        }
+      } else {
+        console.warn("⚠️ Stored token expired for sync")
+      }
     }
 
     console.log(`🔄 Syncing folder: ${folder.name || folder.folderId}`)

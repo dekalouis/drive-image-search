@@ -47,6 +47,39 @@ connection.on("close", () => {
 // Progress tracking for folders
 const folderProgress = new Map<string, { startTime: number; totalImages: number; processedImages: number }>()
 
+// Cleanup stale progress entries
+async function cleanupStaleProgress() {
+  const now = Date.now()
+  const maxAge = 30 * 60 * 1000 // 30 minutes
+  
+  for (const [folderId, data] of folderProgress.entries()) {
+    // Remove entries older than maxAge
+    if (now - data.startTime > maxAge) {
+      console.log(`🧹 Cleaning up stale progress for folder ${folderId} (age: ${Math.round((now - data.startTime) / 60000)} minutes)`)
+      folderProgress.delete(folderId)
+      continue
+    }
+    
+    // Check if folder is still processing in DB
+    try {
+      const folder = await prisma.folder.findUnique({
+        where: { id: folderId },
+        select: { status: true }
+      })
+      
+      if (!folder || folder.status !== 'processing') {
+        console.log(`🧹 Cleaning up progress for folder ${folderId} (status: ${folder?.status || 'not found'})`)
+        folderProgress.delete(folderId)
+      }
+    } catch (error) {
+      console.warn(`⚠️ Error checking folder status during cleanup: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+// Run cleanup every 5 minutes
+setInterval(cleanupStaleProgress, 5 * 60 * 1000)
+
 // Export progress tracking for external monitoring
 export function getFolderProgress() {
   const progress = Array.from(folderProgress.entries()).map(([folderId, data]) => {
@@ -442,16 +475,26 @@ export const imageWorker = new Worker(
 
 // Helper function to update folder progress
 async function updateFolderProgress(folderId: string) {
-  const [totalImages, processedImages] = await Promise.all([
+  const [totalImages, processedImages, failedImages] = await Promise.all([
     prisma.image.count({
       where: { folderId },
     }),
     prisma.image.count({
       where: { folderId, status: "completed" },
     }),
+    prisma.image.count({
+      where: { folderId, status: "failed" },
+    }),
   ])
 
-  const status = processedImages === totalImages ? "completed" : "processing"
+  // Determine status based on processed + failed vs total
+  let status: string
+  if (processedImages + failedImages >= totalImages) {
+    // All images have been attempted
+    status = failedImages > 0 ? "completed_with_errors" : "completed"
+  } else {
+    status = "processing"
+  }
 
   await prisma.folder.update({
     where: { id: folderId },
@@ -465,23 +508,21 @@ async function updateFolderProgress(folderId: string) {
   const progress = folderProgress.get(folderId)
   if (progress) {
     const elapsedTime = Date.now() - progress.startTime
-    const processedImages = await prisma.image.count({
-      where: { folderId, status: "completed" },
-    })
     const imagesPerMinute = processedImages > 0 ? (processedImages / (elapsedTime / 60000)) : 0
 
     console.log(`📈 Folder Progress Update:`)
     console.log(`   - Progress: ${processedImages}/${totalImages} images (${Math.round((processedImages/totalImages)*100)}%)`)
+    console.log(`   - Failed: ${failedImages}`)
     console.log(`   - Status: ${status}`)
     console.log(`   - Elapsed time: ${Math.round(elapsedTime/1000)}s`)
     console.log(`   - Processing speed: ${Math.round(imagesPerMinute)} images/minute`)
     
-    if (status === "completed") {
+    if (status === "completed" || status === "completed_with_errors") {
       console.log(`🎉 Folder completed! Total time: ${Math.round(elapsedTime/1000)}s`)
       folderProgress.delete(folderId) // Clean up progress tracking
     }
   } else {
-    console.log(`Updated folder progress: ${processedImages}/${totalImages} (${status})`)
+    console.log(`Updated folder progress: ${processedImages}/${totalImages} (failed: ${failedImages}, status: ${status})`)
   }
 }
 
