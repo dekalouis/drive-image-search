@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { imageRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
 // Helper function to clean captions
 function cleanCaption(caption?: string): string | undefined {
@@ -34,6 +35,26 @@ function cleanCaption(caption?: string): string | undefined {
 
 export async function GET(request: NextRequest) {
   try {
+    // Rate limiting
+    const identifier = getClientIdentifier(request)
+    const rateLimitResult = await checkRateLimit(imageRateLimiter, identifier)
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000)
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getRateLimitHeaders(rateLimitResult, 100),
+            'Retry-After': Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const { searchParams } = new URL(request.url)
     const folderId = searchParams.get("folderId")
 
@@ -69,12 +90,31 @@ export async function GET(request: NextRequest) {
         webViewLink: true,
         status: true,
         caption: true,
-        tags: true,
         error: true,
         createdAt: true,
       },
       orderBy: { createdAt: "asc" },
     })
+
+    // Update folder progress from actual image counts
+    const processedImages = images.filter(img => img.status === "completed").length
+    const totalImages = images.length
+    
+    // Update status based on actual counts
+    let status = folder.status
+    if (processedImages === totalImages && totalImages > 0) {
+      status = "completed"
+    } else if (processedImages > 0 || images.some(img => img.status === "processing")) {
+      status = "processing"
+    }
+
+    // Update folder if counts changed
+    if (processedImages !== folder.processedImages || totalImages !== folder.totalImages || status !== folder.status) {
+      await prisma.folder.update({
+        where: { id: folderId },
+        data: { processedImages, totalImages, status },
+      })
+    }
 
     // Clean captions for all images
     const cleanedImages = images.map(image => ({
@@ -84,6 +124,9 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       ...folder,
+      totalImages,
+      processedImages,
+      status,
       images: cleanedImages,
     })
   } catch (error) {

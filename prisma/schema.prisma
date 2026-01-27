@@ -1,70 +1,105 @@
 generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-// Enable pgvector extension
-generator pgvector {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
 }
 
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector")]
+}
+
 model User {
-  id        String   @id @default(cuid())
-  clerkId   String   @unique // Clerk user ID
-  email     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  folders   Folder[]
+  id          String       @id @default(cuid())
+  clerkId     String       @unique // Clerk user ID
+  email       String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  folders     Folder[]
+  folderScans FolderScan[]
 
   @@map("users")
 }
 
 model Folder {
-  id              String   @id @default(cuid())
-  folderId        String   @unique // Google folder ID
-  name            String?  // Folder name from Google Drive
-  folderUrl       String
-  status          String   // 'pending' | 'processing' | 'completed' | 'failed'
-  totalImages     Int      @default(0)
-  processedImages Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  images          Image[]
-  userId          String?  // Optional for backward compatibility
-  user            User?    @relation(fields: [userId], references: [id])
+  id                    String    @id @default(cuid())
+  folderId              String    @unique // Google folder ID
+  name                  String?   // Folder name from Google Drive
+  folderUrl             String
+  status                String    // 'pending' | 'processing' | 'completed' | 'failed'
+  totalImages           Int       @default(0)
+  processedImages       Int       @default(0)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  images                Image[]
+  userId                String?   // Optional for backward compatibility
+  user                  User?     @relation(fields: [userId], references: [id])
+  
+  // OAuth token storage for background processing
+  accessTokenEncrypted  String?   // Encrypted Google OAuth access token
+  tokenExpiresAt        DateTime? // Token expiration time
 
   @@index([userId])
   @@map("folders")
 }
 
 model Image {
-  id             String    @id @default(cuid())
-  folderId       String
-  fileId         String    @unique
-  name           String
-  mimeType       String
-  thumbnailLink  String
-  webViewLink    String
-  downloadUrl    String?   // resolved server-side; optional
-  size           Int?
-  md5Checksum    String?
-  modifiedTime   DateTime?
-  etag           String?   // or 'version'/'rev' from Drive
-  status         String    // 'pending' | 'processing' | 'completed' | 'failed'
-  caption        String?
-  tags           String?   // comma-separated
-  captionVec     Json?     // Vector embeddings stored as JSON array
-  error          String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id            String    @id @default(cuid())
+  folderId      String
+  fileId        String    @unique
+  name          String
+  mimeType      String
+  thumbnailLink String
+  webViewLink   String
+  downloadUrl   String?   // resolved server-side; optional
+  size          Int?
+  md5Checksum   String?
+  modifiedTime  DateTime?
+  etag          String?   // or 'version'/'rev' from Drive
+  status        String    // 'pending' | 'processing' | 'completed' | 'failed'
+  caption       String?
+  captionVec    Unsupported("vector(768)")? // Native pgvector for fast similarity search
+  error         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  folder         Folder    @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  folder Folder @relation(fields: [folderId], references: [id], onDelete: Cascade)
 
   @@index([folderId])
   @@map("images")
+}
+
+// Deduplication: Canonical Drive Folder - stored once per unique Drive folder
+model DriveFolder {
+  id             String   @id @default(cuid())
+  driveFolderId  String   @unique // Google Drive folder ID (from URL)
+  folderName     String
+  driveUrl       String   // Original URL
+  referenceCount Int      @default(0)
+  lastScanned    DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  folderScans FolderScan[]
+
+  @@index([driveFolderId])
+  @@map("drive_folders")
+}
+
+// User's reference to a Drive folder - allows same folder to be scanned by multiple users
+model FolderScan {
+  id            String    @id @default(cuid())
+  userId        String?   // null for anonymous free-tier users
+  driveFolderId String
+  scannedAt     DateTime  @default(now())
+  deletedAt     DateTime? // Soft delete
+
+  user        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  driveFolder DriveFolder @relation(fields: [driveFolderId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, driveFolderId]) // Composite unique: user can only scan same folder once
+  @@index([userId])
+  @@index([driveFolderId])
+  @@index([deletedAt])
+  @@map("folder_scans")
 }

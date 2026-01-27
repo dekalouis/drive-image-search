@@ -72,6 +72,63 @@ npx prisma migrate deploy
 - Check that all migration files are committed to git
 - Ensure the database has the `vector` extension enabled (should be in migration)
 - Run `npx prisma migrate status` to see pending migrations
+- **If you see pgvector errors**: See [RAILWAY_PGVECTOR_SETUP.md](./RAILWAY_PGVECTOR_SETUP.md) for detailed setup instructions
+
+### Workers stop processing after Railway restart
+Railway may restart services periodically, causing workers to lose their connections. This can leave jobs "stalled".
+
+**Symptoms:**
+- Processing stops midway (e.g., 10/20 images processed)
+- No new jobs are being processed
+- Logs show "Workers running - Folder: true, Image: true" but no activity
+
+**Solutions:**
+
+1. **Check health endpoint:**
+   ```bash
+   curl https://your-app.up.railway.app/api/health
+   ```
+
+2. **Recover stalled jobs locally:**
+   ```bash
+   railway run npx tsx scripts/recover-jobs.ts
+   ```
+
+3. **Retry pending/failed images via API:**
+   ```bash
+   curl -X POST https://your-app.up.railway.app/api/retry-image \
+     -H "Content-Type: application/json" \
+     -d '{"folderId": "your-folder-id"}'
+   ```
+
+4. **Restart the Workers service** in Railway dashboard
+
+**Prevention:** The workers now have:
+- Automatic reconnection to Redis
+- Stalled job detection and recovery (every 30 seconds)
+- Proper lock duration settings
+
+### Image processing stuck on "processing" status
+If images are stuck with status "processing" for more than 5 minutes:
+
+1. Run the recovery script:
+   ```bash
+   railway run npx tsx scripts/recover-jobs.ts
+   ```
+
+2. This will:
+   - Reset stuck images to "pending"
+   - Queue them for reprocessing
+   - Update folder progress counts
+
+## Health Check
+
+The `/api/health` endpoint checks:
+- Database connectivity
+- Redis/Queue connectivity
+- Queue statistics
+
+Use this for Railway's health check configuration.
 
 ## Notes
 

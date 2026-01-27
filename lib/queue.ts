@@ -1,22 +1,42 @@
 import { Queue } from "bullmq"
 import IORedis from "ioredis"
 
-// Redis connection
+// Redis connection with reconnection logic for Railway restarts
 const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
   maxRetriesPerRequest: null,
+  // Reconnection settings for Railway restarts
+  retryStrategy: (times: number) => {
+    const delay = Math.min(times * 100, 3000) // Max 3 second delay
+    console.log(`🔄 Queue Redis reconnecting... attempt ${times}, delay ${delay}ms`)
+    return delay
+  },
+  reconnectOnError: (err) => {
+    console.log(`🔄 Queue Redis reconnect on error: ${err.message}`)
+    return true // Always try to reconnect
+  },
+  enableReadyCheck: true,
+  lazyConnect: false,
 })
 
 // Add connection event logging
 connection.on("connect", () => {
-  console.log("🔗 Redis connected successfully")
+  console.log("🔗 Queue Redis connected successfully")
 })
 
 connection.on("error", (error) => {
-  console.error("❌ Redis connection error:", error)
+  console.error("❌ Queue Redis connection error:", error)
 })
 
 connection.on("ready", () => {
-  console.log("✅ Redis ready for operations")
+  console.log("✅ Queue Redis ready for operations")
+})
+
+connection.on("reconnecting", () => {
+  console.log("🔄 Queue Redis reconnecting...")
+})
+
+connection.on("close", () => {
+  console.log("⚠️ Queue Redis connection closed")
 })
 
 // Queue configurations
@@ -52,6 +72,7 @@ export const imageQueue = new Queue("images", {
 export interface FolderJobData {
   folderId: string
   googleFolderId: string
+  accessToken?: string
 }
 
 export interface ImageJobData {
@@ -59,11 +80,27 @@ export interface ImageJobData {
   fileId: string
   etag: string
   folderId: string
+  accessToken?: string
+}
+
+export interface ImageBatchJobData {
+  images: Array<{
+    imageId: string
+    fileId: string
+    etag: string
+    folderId: string
+    mimeType: string
+    name: string
+  }>
+  folderId: string
+  accessToken?: string
 }
 
 // Queue folder processing job
-export async function queueFolderProcessing(folderId: string, googleFolderId: string) {
-  const jobId = `folder:${googleFolderId}`
+export async function queueFolderProcessing(folderId: string, googleFolderId: string, accessToken?: string) {
+  // Include timestamp to allow re-processing after sync finds new images
+  const timestamp = Date.now()
+  const jobId = `folder:${googleFolderId}:${timestamp}`
 
   console.log(`🚀 Queueing folder processing job: ${jobId}`)
   console.log(`   - Database ID: ${folderId}`)
@@ -71,9 +108,8 @@ export async function queueFolderProcessing(folderId: string, googleFolderId: st
   console.log(`   - Timestamp: ${new Date().toISOString()}`)
 
   try {
-    await folderQueue.add("process", { folderId, googleFolderId } as FolderJobData, {
-      jobId, // Use folder ID for deduplication
-      // delay: 1000, // Small delay to ensure DB consistency - REMOVED FOR TESTING
+    await folderQueue.add("process", { folderId, googleFolderId, accessToken } as FolderJobData, {
+      jobId,
     })
 
     console.log(`✅ Successfully queued folder processing job: ${jobId}`)
@@ -87,29 +123,47 @@ export async function queueFolderProcessing(folderId: string, googleFolderId: st
   }
 }
 
-// Queue image captioning job
-export async function queueImageCaptioning(imageId: string, fileId: string, etag: string, folderId: string) {
+// Queue image captioning job (legacy single)
+export async function queueImageCaptioning(imageId: string, fileId: string, etag: string, folderId: string, accessToken?: string) {
   const jobId = `image:${fileId}:${etag}`
 
   console.log(`🚀 Queueing image captioning job: ${jobId}`)
-  console.log(`   - Image ID: ${imageId}`)
-  console.log(`   - File ID: ${fileId}`)
-  console.log(`   - ETag: ${etag}`)
-  console.log(`   - Folder ID: ${folderId}`)
-  console.log(`   - Timestamp: ${new Date().toISOString()}`)
 
   try {
-    await imageQueue.add("caption", { imageId, fileId, etag, folderId } as ImageJobData, {
+    await imageQueue.add("caption", { imageId, fileId, etag, folderId, accessToken } as ImageJobData, {
       jobId, // Use fileId:etag for idempotency
     })
 
     console.log(`✅ Successfully queued image captioning job: ${jobId}`)
-    
-    // Log queue stats
-    const stats = await imageQueue.getJobCounts()
-    console.log(`📊 Image queue stats:`, stats)
   } catch (error) {
     console.error(`❌ Failed to queue image captioning job: ${jobId}`, error)
+    throw error
+  }
+}
+
+// Queue batch of images
+export async function queueImageBatch(data: ImageBatchJobData) {
+  const jobId = `batch:${data.folderId}:${Date.now()}:${Math.random().toString(36).substring(7)}`
+  
+  console.log(`🚀 Queueing image batch job: ${jobId} with ${data.images.length} images`)
+
+  try {
+    const job = await imageQueue.add("batch-caption", data, {
+      jobId,
+      // Ensure job is retried if worker crashes
+      attempts: 3,
+      backoff: {
+        type: "exponential",
+        delay: 2000,
+      },
+    })
+    console.log(`✅ Successfully queued batch job: ${jobId} (job ID: ${job.id})`)
+    
+    // Log queue stats after adding
+    const stats = await imageQueue.getJobCounts()
+    console.log(`📊 Image queue stats after queuing: waiting=${stats.waiting}, active=${stats.active}, completed=${stats.completed}, failed=${stats.failed}`)
+  } catch (error) {
+    console.error(`❌ Failed to queue batch job: ${jobId}`, error)
     throw error
   }
 }
@@ -153,6 +207,7 @@ export async function cleanupJobs() {
       folderQueue.clean(24 * 60 * 60 * 1000, 10, "completed"), // Keep completed jobs for 24h
       folderQueue.clean(7 * 24 * 60 * 60 * 1000, 50, "failed"), // Keep failed jobs for 7 days
       imageQueue.clean(24 * 60 * 60 * 1000, 100, "completed"),
+      imageQueue.clean(7 * 24 * 60 * 60 * 1000, 100, "completed"),
       imageQueue.clean(7 * 24 * 60 * 60 * 1000, 100, "failed"),
     ])
     
@@ -160,5 +215,89 @@ export async function cleanupJobs() {
   } catch (error) {
     console.error("❌ Job cleanup failed:", error)
     throw error
+  }
+}
+
+// Recover stalled/stuck jobs - useful after Railway restarts
+export async function recoverStalledJobs() {
+  console.log("🔄 Recovering stalled jobs...")
+  
+  try {
+    const [folderStats, imageStats] = await Promise.all([
+      folderQueue.getJobCounts(),
+      imageQueue.getJobCounts()
+    ])
+    
+    console.log(`📊 Current queue state:`)
+    console.log(`   Folders - waiting: ${folderStats.waiting}, active: ${folderStats.active}, failed: ${folderStats.failed}`)
+    console.log(`   Images - waiting: ${imageStats.waiting}, active: ${imageStats.active}, failed: ${imageStats.failed}`)
+    
+    // Get active jobs that might be stalled
+    const [activeFolderJobs, activeImageJobs] = await Promise.all([
+      folderQueue.getJobs(['active']),
+      imageQueue.getJobs(['active'])
+    ])
+    
+    let recoveredCount = 0
+    
+    // Check for jobs that have been active too long (likely stalled)
+    const stalledThreshold = 5 * 60 * 1000 // 5 minutes
+    const now = Date.now()
+    
+    for (const job of activeFolderJobs) {
+      if (job.processedOn && now - job.processedOn > stalledThreshold) {
+        console.log(`⚠️ Found stalled folder job: ${job.id}, moving to failed`)
+        await job.moveToFailed(new Error('Job stalled - worker restart recovery'), 'recovery')
+        recoveredCount++
+      }
+    }
+    
+    for (const job of activeImageJobs) {
+      if (job.processedOn && now - job.processedOn > stalledThreshold) {
+        console.log(`⚠️ Found stalled image job: ${job.id}, moving to failed`)
+        await job.moveToFailed(new Error('Job stalled - worker restart recovery'), 'recovery')
+        recoveredCount++
+      }
+    }
+    
+    console.log(`✅ Recovery complete: ${recoveredCount} stalled jobs recovered`)
+    
+    return {
+      folderStats,
+      imageStats,
+      recoveredCount
+    }
+  } catch (error) {
+    console.error("❌ Job recovery failed:", error)
+    throw error
+  }
+}
+
+// Health check for queue system
+export async function healthCheck() {
+  try {
+    // Test Redis connection
+    await connection.ping()
+    
+    const [folderStats, imageStats] = await Promise.all([
+      folderQueue.getJobCounts(),
+      imageQueue.getJobCounts()
+    ])
+    
+    return {
+      healthy: true,
+      redis: 'connected',
+      queues: {
+        folders: folderStats,
+        images: imageStats
+      },
+      timestamp: new Date().toISOString()
+    }
+  } catch (error) {
+    return {
+      healthy: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      timestamp: new Date().toISOString()
+    }
   }
 }

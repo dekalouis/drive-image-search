@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai"
+import sharp from "sharp"
 import { getDownloadUrl, getAuthenticatedDownloadUrl, getDriveClient } from "@/lib/drive"
 
 // Initialize Gemini AI client
@@ -11,179 +12,183 @@ function getGeminiClient() {
 }
 
 // Download image from Google Drive with retry logic and timeout protection
-async function downloadWithRetry(fileId: string, maxRetries = 3): Promise<Buffer> {
+async function downloadWithRetry(fileId: string, maxRetries = 3, accessToken?: string): Promise<Buffer> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`⏬ Attempt ${attempt}/${maxRetries} downloading image: ${fileId}`)
-      
+
       // Rate limit Google Drive requests
       await driveRateLimiter.waitIfNeeded()
-      
-      const downloadUrl = getDownloadUrl(fileId)
-      
+
+      // If accessToken is provided, use authenticated download URL (always works if token valid)
+      // Otherwise use public download URL
+      const downloadUrl = accessToken ? getAuthenticatedDownloadUrl(fileId) : getDownloadUrl(fileId)
+
       // Create AbortController for timeout
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
-      
+
+      const headers: Record<string, string> = {
+        "User-Agent": "Drive-Image-Searcher/1.0",
+      }
+
+      if (accessToken) {
+        headers.Authorization = `Bearer ${accessToken}`
+      }
+
       const response = await fetch(downloadUrl, {
-        headers: {
-          "User-Agent": "Drive-Image-Searcher/1.0",
-        },
+        headers,
         signal: controller.signal,
       })
-      
+
       clearTimeout(timeoutId)
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
-      
+
       const arrayBuffer = await response.arrayBuffer()
       const buffer = Buffer.from(arrayBuffer)
-      
+
       console.log(`✅ Successfully downloaded image: ${fileId} (${buffer.length} bytes)`)
       return buffer
-      
+
     } catch (error: unknown) {
       const isLastAttempt = attempt === maxRetries
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      
+
       console.log(`❌ Download attempt ${attempt}/${maxRetries} failed for ${fileId}: ${errorMessage}`)
-      
+
       if (isLastAttempt) {
         // Try alternative download URL on final attempt
         try {
           console.log(`🔄 Trying alternative download URL for ${fileId}`)
-          
+
           // Rate limit the alternative request too
           await driveRateLimiter.waitIfNeeded()
-          
+
           const alternativeUrl = getAuthenticatedDownloadUrl(fileId)
-          
+
           const controller = new AbortController()
           const timeoutId = setTimeout(() => controller.abort(), 30000)
-          
+
+          const headers: Record<string, string> = {
+            "User-Agent": "Drive-Image-Searcher/1.0",
+          }
+
+          if (accessToken) {
+            headers.Authorization = `Bearer ${accessToken}`
+          }
+
           const response = await fetch(alternativeUrl, {
-            headers: {
-              "User-Agent": "Drive-Image-Searcher/1.0",
-            },
+            headers,
             signal: controller.signal,
           })
-          
+
           clearTimeout(timeoutId)
-          
+
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`)
           }
-          
+
           const arrayBuffer = await response.arrayBuffer()
           const buffer = Buffer.from(arrayBuffer)
-          
+
           console.log(`✅ Alternative download successful for ${fileId} (${buffer.length} bytes)`)
           return buffer
-          
+
         } catch (altError: unknown) {
           const altErrorMessage = altError instanceof Error ? altError.message : 'Unknown error'
           console.error(`💀 All download attempts failed for ${fileId}:`, altErrorMessage)
           throw new Error(`Failed to download image after ${maxRetries} attempts: ${errorMessage}`)
         }
       }
-      
+
       // Exponential backoff: 2^attempt seconds + jitter
       const baseDelay = Math.pow(2, attempt) * 1000 // 2s, 4s, 8s
       const jitter = Math.random() * 1000 // 0-1s random jitter
       const delay = baseDelay + jitter
-      
+
       console.log(`⏳ Waiting ${Math.round(delay)}ms before retry ${attempt + 1}/${maxRetries}`)
       await new Promise(resolve => setTimeout(resolve, delay))
     }
   }
-  
+
   throw new Error(`Should never reach here`)
 }
 
 // Legacy function for backward compatibility
-async function downloadImage(fileId: string): Promise<Buffer> {
-  return downloadWithRetry(fileId, 3)
+async function downloadImage(fileId: string, accessToken?: string): Promise<Buffer> {
+  return downloadWithRetry(fileId, 3, accessToken)
 }
 
-// Comprehensive structured prompt for rich image analysis
-const STRUCTURED_CAPTION_PROMPT = `You are an expert image analysis assistant optimized for semantic search. Analyze this image thoroughly and extract comprehensive metadata.
-
-## Instructions
-Examine the image carefully and provide detailed information for each category below. Be factual and specific. If a category doesn't apply, use null or empty array.
-
-## Required Output Format (JSON)
-{
-  "subjects": {
-    "people": {
-      "count": number or "none" or "many",
-      "descriptions": ["description of each person/group"],
-      "actions": ["what they are doing"],
-      "emotions": ["visible emotional states"],
-      "attire": ["clothing/uniforms descriptions"]
-    },
-    "objects": ["list of significant objects with colors/details"],
-    "animals": ["list of animals if any"],
-    "text_visible": ["any readable text, signs, logos, labels - OCR"]
-  },
-  "context": {
-    "setting": "indoor/outdoor/studio/etc",
-    "location_type": "specific location type (stadium, office, beach, etc)",
-    "time_of_day": "morning/afternoon/evening/night/unclear",
-    "weather": "if outdoor and visible",
-    "lighting": "natural/artificial/mixed, quality description"
-  },
-  "visual_style": {
-    "photography_type": "portrait/landscape/action/macro/aerial/etc",
-    "composition": "centered/rule-of-thirds/symmetrical/etc",
-    "colors": {
-      "dominant": ["main colors"],
-      "mood": "warm/cool/neutral/vibrant/muted"
-    },
-    "quality": "professional/amateur/candid/staged"
-  },
-  "summary": {
-    "main_caption": "2-3 sentence comprehensive description of the image",
-    "search_keywords": ["10-15 relevant search terms that someone might use to find this image"]
+// Resize image for AI processing to reduce token usage and improve speed
+async function resizeImageForAI(imageBuffer: Buffer): Promise<Buffer> {
+  try {
+    const resizeStart = Date.now()
+    
+    // Use sharp to resize image to max 1024px on longest side while maintaining aspect ratio
+    const resized = await sharp(imageBuffer)
+      .resize(1024, 1024, {
+        fit: 'inside', // Maintain aspect ratio, fit within 1024x1024
+        withoutEnlargement: true // Don't upscale smaller images
+      })
+      .toFormat('jpeg', { quality: 80 }) // Use JPEG with 80% quality for best compression
+      .toBuffer()
+    
+    const resizeTime = Date.now() - resizeStart
+    const originalSize = imageBuffer.length
+    const resizedSize = resized.length
+    const savingsPercent = ((originalSize - resizedSize) / originalSize * 100).toFixed(1)
+    
+    console.log(`🖼️  Image resized in ${resizeTime}ms: ${originalSize} → ${resizedSize} bytes (${savingsPercent}% reduction)`)
+    
+    return resized
+  } catch (error) {
+    console.warn('Failed to resize image, using original:', error instanceof Error ? error.message : String(error))
+    return imageBuffer
   }
 }
 
-## Guidelines
-- Be literal and factual - describe what you SEE
-- Include colors, quantities, and spatial relationships
-- Extract ALL visible text (OCR) - signs, labels, watermarks, etc.
-- For sports/action: describe the specific activity, equipment, team colors
-- For people: note approximate age range, gender if clear, expressions
-- Keywords should include synonyms and related terms for better search matching`
+// Optimized dense prompt for faster processing and better embeddings - targets 100-150 tokens output
+const DENSE_CAPTION_PROMPT = `Describe this image in a single dense paragraph for search indexing.
+Include: all subjects/objects with counts and colors, actions and interactions,
+setting (indoor/outdoor, environment, lighting), visual style (photo/illustration/screenshot),
+any readable text or logos exactly as written, and notable details.
+End with a comma-separated keyword list of 10-15 search terms.
+Be exhaustive but concise. 100-150 tokens max. Neutral language. Say "uncertain" if unsure.`
 
-// Caption an image using Gemini 2.0 Flash with comprehensive analysis
+// Caption an image using Gemini 2.5 Flash with comprehensive analysis
 export async function captionImage(
   fileId: string,
   mimeType: string,
+  accessToken?: string
 ): Promise<{
   caption: string
-  tags: string[]
 }> {
   const genAI = getGeminiClient()
-  // Use gemini-2.0-flash for better captioning quality (not lite)
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" })
+  // Use gemini-2.5-flash for best captioning quality
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" })
 
   try {
-    // Download the image with timing
+    // Download the image (prefer thumbnail for speed)
     const downloadStart = Date.now()
-    const imageBuffer = await downloadImage(fileId)
+    // Download full image (best quality for detailed captions)
+    const imageBuffer = await downloadImage(fileId, accessToken)
     const downloadTime = Date.now() - downloadStart
     console.log(`⏱️  Download time for ${fileId}: ${downloadTime}ms`)
 
-    // Generate content with comprehensive prompt
+    // Resize image for AI processing to reduce token usage and improve speed
+    const resizedBuffer = await resizeImageForAI(imageBuffer)
+
+    // Generate content with dense prompt
     const aiStart = Date.now()
     const result = await model.generateContent([
-      STRUCTURED_CAPTION_PROMPT,
+      DENSE_CAPTION_PROMPT,
       {
         inlineData: {
-          data: imageBuffer.toString("base64"),
-          mimeType,
+          data: resizedBuffer.toString("base64"),
+          mimeType: "image/jpeg", // Always use JPEG after resize
         },
       },
     ])
@@ -193,127 +198,41 @@ export async function captionImage(
     const response = await result.response
     const text = response.text()
 
-    // Clean the response text to handle markdown formatting
-    let cleanedText = text.trim()
-    
-    // Remove markdown code blocks if present
-    if (cleanedText.startsWith('```json') && cleanedText.endsWith('```')) {
-      cleanedText = cleanedText.replace(/^```json\n?/, '').replace(/\n?```$/, '')
-    } else if (cleanedText.startsWith('```') && cleanedText.endsWith('```')) {
-      cleanedText = cleanedText.replace(/^```\n?/, '').replace(/\n?```$/, '')
-    }
-    
-    // Remove any leading/trailing whitespace
-    cleanedText = cleanedText.trim()
-
-    // Parse JSON response and build comprehensive caption
+    // Parse flat text response and extract caption only
     try {
-      const parsed = JSON.parse(cleanedText)
-      
-      // Build a rich, searchable caption from structured data
-      const captionParts: string[] = []
-      
-      // Main caption
-      if (parsed.summary?.main_caption) {
-        captionParts.push(parsed.summary.main_caption)
-      }
-      
-      // Add subject details
-      if (parsed.subjects) {
-        const { people, objects, animals, text_visible } = parsed.subjects
-        
-        if (people?.descriptions?.length > 0) {
-          captionParts.push(`People: ${people.descriptions.join(', ')}`)
-        }
-        if (people?.actions?.length > 0) {
-          captionParts.push(`Actions: ${people.actions.join(', ')}`)
-        }
-        if (people?.attire?.length > 0) {
-          captionParts.push(`Attire: ${people.attire.join(', ')}`)
-        }
-        if (objects?.length > 0) {
-          captionParts.push(`Objects: ${objects.join(', ')}`)
-        }
-        if (animals?.length > 0) {
-          captionParts.push(`Animals: ${animals.join(', ')}`)
-        }
-        if (text_visible?.length > 0) {
-          captionParts.push(`Visible text: ${text_visible.join(', ')}`)
-        }
-      }
-      
-      // Add context
-      if (parsed.context) {
-        const { setting, location_type, time_of_day, weather, lighting } = parsed.context
-        const contextParts = [setting, location_type, time_of_day, weather, lighting].filter(Boolean)
-        if (contextParts.length > 0) {
-          captionParts.push(`Context: ${contextParts.join(', ')}`)
-        }
-      }
-      
-      // Add visual style
-      if (parsed.visual_style) {
-        const { photography_type, colors } = parsed.visual_style
-        if (photography_type) {
-          captionParts.push(`Style: ${photography_type}`)
-        }
-        if (colors?.dominant?.length > 0) {
-          captionParts.push(`Colors: ${colors.dominant.join(', ')}`)
-        }
-      }
-      
-      // Combine into final caption (limit to 1500 chars for embedding efficiency)
-      const caption = captionParts.join('. ').substring(0, 1500)
-      
-      // Extract tags from search_keywords and other fields
-      const tags: string[] = []
-      
-      // Add search keywords
-      if (parsed.summary?.search_keywords) {
-        tags.push(...parsed.summary.search_keywords)
-      }
-      
-      // Add additional tags from structured data
-      if (parsed.subjects?.objects) tags.push(...parsed.subjects.objects.slice(0, 5))
-      if (parsed.subjects?.people?.actions) tags.push(...parsed.subjects.people.actions)
-      if (parsed.context?.setting) tags.push(parsed.context.setting)
-      if (parsed.context?.location_type) tags.push(parsed.context.location_type)
-      if (parsed.visual_style?.photography_type) tags.push(parsed.visual_style.photography_type)
-      if (parsed.visual_style?.colors?.dominant) tags.push(...parsed.visual_style.colors.dominant)
-      
-      // Clean and deduplicate tags
-      const cleanedTags = [...new Set(
-        tags
-          .filter((tag): tag is string => typeof tag === 'string' && tag.length > 0)
-          .map(tag => tag.toLowerCase().trim().replace(/\s+/g, '-'))
-          .filter(tag => tag.length > 0 && tag.length <= 30)
-      )].slice(0, 20) // Allow more tags for richer search
+      const cleanedText = text.trim()
+      const lines = cleanedText.split('\n').filter(line => line.trim().length > 0)
 
-      console.log(`📝 Generated comprehensive caption for ${fileId}: ${caption.substring(0, 100)}...`)
-      console.log(`🏷️  Generated ${cleanedTags.length} tags for ${fileId}`)
+      if (lines.length === 0) {
+        throw new Error("Empty response from AI")
+      }
 
-      return { caption, tags: cleanedTags }
+      // Entire response is the caption (including the last line which now just has keywords we'll ignore)
+      const caption = cleanedText
+        .split('\n')
+        .slice(0, -1) // Remove last line (keyword list)
+        .join(' ')
+        .trim()
+
+      // Ensure we have non-empty caption
+      const finalCaption = caption.substring(0, 1500) || cleanedText.substring(0, 1500)
+
+      console.log(`📝 Generated caption for ${fileId}: ${finalCaption.substring(0, 100)}...`)
+
+      return { caption: finalCaption }
     } catch (parseError) {
-      // Fallback: try to extract useful info from raw text
-      console.warn("Failed to parse structured JSON response, using fallback:", parseError)
+      // Fallback: use raw text as caption
+      console.warn("Failed to parse response, using fallback:", parseError)
       console.warn("Raw response (first 500 chars):", text.substring(0, 500))
-      
-      // Try to extract any useful text as caption
+
       const fallbackCaption = text
-        .replace(/```json\n?|\n?```/g, '')
-        .replace(/[{}\[\]"]/g, ' ')
+        .replace(/\n+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
         .substring(0, 500)
-      
-      // Extract potential keywords from the text
-      const wordPattern = /\b[a-zA-Z]{3,15}\b/g
-      const words = fallbackCaption.match(wordPattern) || []
-      const fallbackTags = [...new Set(words.map(w => w.toLowerCase()))].slice(0, 10)
-      
-      return { 
-        caption: fallbackCaption || "Image content", 
-        tags: fallbackTags.length > 0 ? fallbackTags : ["image", "content"] 
+
+      return {
+        caption: fallbackCaption || "Image content",
       }
     }
   } catch (error) {
@@ -322,13 +241,25 @@ export async function captionImage(
   }
 }
 
+// Normalize text for consistent embedding and search matching
+// This ensures case-insensitive matching and consistent whitespace handling
+export function normalizeTextForEmbedding(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
 // Generate text embedding for search
-export async function generateTextEmbedding(text: string): Promise<number[]> {
+export async function generateTextEmbedding(text: string, normalize: boolean = true): Promise<number[]> {
   const genAI = getGeminiClient()
   const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
 
   try {
-    const result = await model.embedContent(text)
+    // Normalize text for consistent embedding matching
+    const processedText = normalize ? normalizeTextForEmbedding(text) : text
+
+    const result = await model.embedContent(processedText)
     const embedding = result.embedding
 
     if (!embedding.values || embedding.values.length === 0) {
@@ -342,11 +273,57 @@ export async function generateTextEmbedding(text: string): Promise<number[]> {
   }
 }
 
-// Generate embeddings for both caption and tags
-export async function generateCaptionEmbedding(caption: string, tags: string[]): Promise<number[]> {
-  // Combine caption and tags for richer semantic representation
-  const combinedText = `${caption} ${tags.join(" ")}`
-  return generateTextEmbedding(combinedText)
+// Generate embeddings for caption only
+export async function generateCaptionEmbedding(caption: string): Promise<number[]> {
+  // Use caption only for embedding
+  return generateTextEmbedding(caption, true)
+}
+
+// Generate batch embeddings for multiple texts in a single API call
+export async function generateBatchEmbeddings(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) {
+    return []
+  }
+
+  const genAI = getGeminiClient()
+  const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
+
+  try {
+    const batchStart = Date.now()
+    console.log(`📦 Generating batch embeddings for ${texts.length} texts`)
+
+    // Check if SDK supports batchEmbedContents
+    const modelWithBatch = model as unknown as { batchEmbedContents?: (config: unknown) => Promise<{ embeddings: Array<{ values: number[] }> }> }
+    if (modelWithBatch.batchEmbedContents) {
+      // Use batchEmbedContents if available
+      const requests = texts.map(text => ({
+        content: { parts: [{ text: normalizeTextForEmbedding(text) }] }
+      }))
+
+      const batchResult = await modelWithBatch.batchEmbedContents({
+        requests
+      })
+
+      const batchTime = Date.now() - batchStart
+      console.log(`⏱️  Batch embedding time for ${texts.length} texts: ${batchTime}ms`)
+
+      return batchResult.embeddings.map((embedding) => embedding.values)
+    } else {
+      // Fallback to Promise.all with individual calls if batch API not available
+      console.log(`⚠️  Batch API not available, using Promise.all with individual calls`)
+      const embeddings = await Promise.all(
+        texts.map(text => generateTextEmbedding(text, true))
+      )
+
+      const batchTime = Date.now() - batchStart
+      console.log(`⏱️  Promise.all embedding time for ${texts.length} texts: ${batchTime}ms`)
+
+      return embeddings
+    }
+  } catch (error) {
+    console.error("Batch embedding generation error:", error)
+    throw new Error(`Failed to generate batch embeddings: ${error instanceof Error ? error.message : "Unknown error"}`)
+  }
 }
 
 // Fast tags-only image analysis using Gemini (optimized for quick processing)
@@ -368,13 +345,13 @@ export async function extractImageTags(
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`🏷️  Extracting tags for ${fileId} (thumbnail: ${useThumbnail}) - Attempt ${attempt}/${maxRetries}`)
-      
+
       // Rate limiting
       await geminiRateLimiter.waitIfNeeded()
 
       // Download image (thumbnail or full) with timeout
       const downloadStart = Date.now()
-      const imageBuffer = useThumbnail 
+      const imageBuffer = useThumbnail
         ? await downloadThumbnail(fileId, 3)
         : await downloadWithRetry(fileId, 3)
       const downloadTime = Date.now() - downloadStart
@@ -417,7 +394,7 @@ Return ONLY a JSON object with this exact format:
       try {
         // Parse JSON response
         const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim())
-        
+
         const tags = Array.isArray(parsed.tags) ? parsed.tags : []
         const quickDescription = parsed.quickDescription || `Image with tags: ${tags.slice(0, 3).join(', ')}`
 
@@ -444,7 +421,7 @@ Return ONLY a JSON object with this exact format:
     } catch (error) {
       const isLastAttempt = attempt === maxRetries
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      
+
       console.error(`Fast tagging error (attempt ${attempt}/${maxRetries}):`, errorMessage)
 
       if (isLastAttempt) {
@@ -467,63 +444,69 @@ Return ONLY a JSON object with this exact format:
 async function downloadThumbnail(fileId: string, maxRetries = 3): Promise<Buffer> {
   // First, get the thumbnail URL from the API
   const drive = getDriveClient()
-  
+
   try {
     const fileResponse = await drive.files.get({
       fileId: fileId,
       fields: "thumbnailLink"
     })
-    
-    const thumbnailUrl = fileResponse.data.thumbnailLink
+
+    // Request a large thumbnail (1024px)
+    let thumbnailUrl = fileResponse.data.thumbnailLink
+    if (thumbnailUrl) {
+      // Modify URL to get a larger version if possible (s220 is default, change to s1024)
+      thumbnailUrl = thumbnailUrl.replace(/=s\d+/, '=s1024')
+    }
+
     if (!thumbnailUrl) {
       throw new Error("No thumbnail available, falling back to full image")
     }
-    
+
     console.log(`📸 Downloading thumbnail: ${fileId}`)
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         // Rate limit Google Drive requests
         await driveRateLimiter.waitIfNeeded()
-        
+
         const controller = new AbortController()
         const timeoutId = setTimeout(() => controller.abort(), 15000) // Shorter timeout for thumbnails
-        
+
         const response = await fetch(thumbnailUrl, {
           headers: {
             "User-Agent": "Drive-Image-Searcher/1.0",
           },
           signal: controller.signal,
         })
-        
+
         clearTimeout(timeoutId)
-        
+
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`)
         }
-        
+
         const arrayBuffer = await response.arrayBuffer()
         const buffer = Buffer.from(arrayBuffer)
-        
+
         console.log(`✅ Successfully downloaded thumbnail: ${fileId} (${buffer.length} bytes)`)
         return buffer
-        
+
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error'
         console.log(`❌ Thumbnail download attempt ${attempt}/${maxRetries} failed: ${errorMessage}`)
-        
+
         if (attempt === maxRetries) {
           throw new Error(`Failed to download thumbnail after ${maxRetries} attempts`)
         }
-        
+
         // Short backoff for thumbnails
         const delay = Math.pow(1.5, attempt) * 500 // 750ms, 1.1s, 1.7s
         await new Promise(resolve => setTimeout(resolve, delay))
       }
     }
-    
+
     throw new Error("Should never reach here")
-    
+
   } catch {
     console.warn(`Thumbnail not available for ${fileId}, falling back to full image`)
     return downloadWithRetry(fileId, maxRetries)

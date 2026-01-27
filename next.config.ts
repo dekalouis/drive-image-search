@@ -2,6 +2,15 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   images: {
+    // Allow our internal proxy endpoints to be used with <Image />
+    localPatterns: [
+      {
+        pathname: "/api/thumbnail-proxy",
+      },
+      {
+        pathname: "/api/image-proxy",
+      },
+    ],
     remotePatterns: [
       {
         protocol: 'https',

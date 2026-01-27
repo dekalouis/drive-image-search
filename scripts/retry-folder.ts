@@ -30,17 +30,12 @@ async function retryFolder(folderId: string) {
       }
     })
     
-    // Reset all images to pending
-    await prisma.image.updateMany({
-      where: { folderId: folder.id },
-      data: { 
-        status: "pending",
-        caption: null,
-        tags: null,
-        captionVec: { set: null },
-        error: null
-      }
-    })
+    // Reset all images to pending using raw SQL (captionVec is an Unsupported type)
+    await prisma.$executeRaw`
+      UPDATE images 
+      SET status = 'pending', caption = NULL, tags = NULL, "captionVec" = NULL, error = NULL
+      WHERE "folderId" = ${folder.id}
+    `
     
     console.log(`✅ Reset folder and ${folder.images.length} images to pending`)
     
