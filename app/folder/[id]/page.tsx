@@ -6,8 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Search, Image as ImageIcon, Loader2, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink, AlertTriangle } from "lucide-react"
+import { Image as ImageIcon, Loader2, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink } from "lucide-react"
 import { ImageCard, type ImageData } from "@/components/image-card"
 import { SearchBar } from "@/components/search-bar"
 import { Modal } from "@/components/ui/modal"
@@ -42,8 +41,6 @@ export default function FolderPage() {
   const [folder, setFolder] = useState<Folder | null>(null)
   const [loading, setLoading] = useState(true)
   const [searchResults, setSearchResults] = useState<Image[]>([])
-  const [searching, setSearching] = useState(false)
-  const [searchFallbackMode, setSearchFallbackMode] = useState(false)
   const [retryingImages, setRetryingImages] = useState<Set<string>>(new Set())
   const [retryingAll, setRetryingAll] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -102,60 +99,6 @@ export default function FolderPage() {
   }, [folderId, fetchFolderData])
 
   // Reset to first page when search results change
-  // Debounced search effect
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  
-  useEffect(() => {
-    // Clear previous timeout
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current)
-    }
-
-    // If search query is empty, clear results immediately
-    if (!searchQuery.trim()) {
-      setSearchResults([])
-      setSearching(false)
-      return
-    }
-
-    // Set loading state immediately
-    setSearching(true)
-
-    // Debounce search - wait 500ms after user stops typing
-    searchTimeoutRef.current = setTimeout(async () => {
-      try {
-        const response = await fetch("/api/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: searchQuery, folderId }),
-        })
-        
-        if (response.ok) {
-          const data = await response.json()
-          // Format results with proper typing
-          const formattedResults = data.results.map((result: { similarity: number; [key: string]: unknown }) => ({
-            ...result,
-            similarity: Math.round(result.similarity * 1000) / 1000, // Round to 3 decimal places
-          }))
-          setSearchResults(formattedResults)
-          setSearchFallbackMode(data.fallbackMode || false)
-        }
-      } catch (error) {
-        console.error("Search error:", error)
-      } finally {
-        setSearching(false)
-      }
-    }, 500) // 500ms debounce delay
-
-    // Cleanup function
-    return () => {
-      if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current)
-      }
-    }
-  }, [searchQuery, folderId])
-
-  // Reset to first page when search changes
   useEffect(() => {
     setCurrentPage(1)
   }, [searchResults])
