@@ -68,7 +68,6 @@ export async function GET(request: NextRequest) {
       select: {
         id: true,
         folderId: true,
-        name: true,
         status: true,
         totalImages: true,
         processedImages: true,

@@ -1,15 +1,15 @@
 "use client"
 
-import { useEffect, useState, useCallback, useRef } from "react"
+import { useEffect, useState, useCallback } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Search, Image as ImageIcon, Loader2, RefreshCw, ChevronLeft, ChevronRight, FolderSync, ExternalLink, AlertTriangle } from "lucide-react"
 import { ImageCard, type ImageData } from "@/components/image-card"
+import { SearchBar } from "@/components/search-bar"
 import { Modal } from "@/components/ui/modal"
 import NextImage from "next/image"
 
@@ -41,7 +41,6 @@ export default function FolderPage() {
   
   const [folder, setFolder] = useState<Folder | null>(null)
   const [loading, setLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<Image[]>([])
   const [searching, setSearching] = useState(false)
   const [searchFallbackMode, setSearchFallbackMode] = useState(false)
@@ -102,6 +101,7 @@ export default function FolderPage() {
     return () => clearInterval(interval)
   }, [folderId, fetchFolderData])
 
+  // Reset to first page when search results change
   // Debounced search effect
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   
@@ -158,7 +158,7 @@ export default function FolderPage() {
   // Reset to first page when search changes
   useEffect(() => {
     setCurrentPage(1)
-  }, [searchQuery])
+  }, [searchResults])
 
   const handleRetryImage = async (imageId: string) => {
     setRetryingImages(prev => new Set(prev).add(imageId))
@@ -262,7 +262,7 @@ export default function FolderPage() {
   }
 
   // Pagination logic
-  const allImages = searchQuery ? searchResults : sortImages(folder?.images || [])
+  const allImages = searchResults.length > 0 ? searchResults : sortImages(folder?.images || [])
   const totalPages = Math.ceil(allImages.length / imagesPerPage)
   const startIndex = (currentPage - 1) * imagesPerPage
   const endIndex = startIndex + imagesPerPage
@@ -529,50 +529,11 @@ export default function FolderPage() {
               )}
             </CardContent>
           </Card>
-
-          {/* Search */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Search className="h-5 w-5" />
-                Search Images
-              </CardTitle>
-              <CardDescription>
-                Search through your images using natural language queries
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    placeholder="Search by description or filename (e.g., 'cat' or 'vacation.jpg')"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="flex-1 pr-10"
-                  />
-                  {searching && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                    </div>
-                  )}
-                </div>
-              </div>
-              {searchQuery && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  {searching ? "Searching..." : `Showing ${searchResults.length} result${searchResults.length !== 1 ? 's' : ''}`}
-                </p>
-              )}
-              {searchFallbackMode && (
-                <Alert className="mt-3 border-orange-200 bg-orange-50 dark:bg-orange-950/20">
-                  <AlertTriangle className="h-4 w-4 text-orange-600 dark:text-orange-400" />
-                  <AlertTitle className="text-orange-800 dark:text-orange-200">Limited Search Mode</AlertTitle>
-                  <AlertDescription className="text-orange-700 dark:text-orange-300">
-                    Semantic search is unavailable. Using filename search instead. Results may be less accurate.
-                  </AlertDescription>
-                </Alert>
-              )}
-            </CardContent>
-          </Card>
+          {/* Search Bar Component */}
+          <SearchBar 
+            folderId={folderId}
+            onResultsChange={setSearchResults}
+          />
         </div>
 
         {/* Top Pagination */}
@@ -598,7 +559,9 @@ export default function FolderPage() {
           <div className="text-center py-12">
             <ImageIcon className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <p className="text-muted-foreground">
-              {searchQuery ? "No images found matching your search." : "No images in this folder."}
+              {searchResults.length === 0 && folder?.images && folder.images.length > 0
+                ? "No images found matching your search."
+                : "No images in this folder."}
             </p>
           </div>
         )}

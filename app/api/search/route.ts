@@ -73,7 +73,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { folderId, query, topK = 12 } = await request.json()
+    const { folderId, query, topK = 12, searchType } = await request.json()
 
     if (!folderId || !query) {
       return NextResponse.json({ error: "folderId and query are required" }, { status: 400 })
@@ -88,8 +88,16 @@ export async function POST(request: NextRequest) {
 
     const trimmedQuery = query.trim()
     
-    // Check if query looks like a filename search (contains file extension or is short)
-    const isFilenameSearch = trimmedQuery.includes('.') || trimmedQuery.length < 3
+    // Determine search type: use provided searchType or fallback to auto-detection
+    let isFilenameSearch: boolean
+    if (searchType === 'semantic') {
+      isFilenameSearch = false
+    } else if (searchType === 'filename') {
+      isFilenameSearch = true
+    } else {
+      // Auto-detection: check if query looks like a filename search (contains file extension or is short)
+      isFilenameSearch = trimmedQuery.includes('.') || trimmedQuery.length < 3
+    }
     
     let results: SearchResult[] = []
     let searchTime = 0
