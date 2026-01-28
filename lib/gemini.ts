@@ -253,7 +253,7 @@ export function normalizeTextForEmbedding(text: string): string {
 // Generate text embedding for search
 export async function generateTextEmbedding(text: string, normalize: boolean = true): Promise<number[]> {
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
+  const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" })
 
   try {
     // Normalize text for consistent embedding matching
@@ -286,7 +286,7 @@ export async function generateBatchEmbeddings(texts: string[]): Promise<number[]
   }
 
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
+  const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" })
 
   try {
     const batchStart = Date.now()
