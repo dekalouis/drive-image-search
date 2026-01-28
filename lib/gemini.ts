@@ -563,8 +563,15 @@ class RateLimiter {
 }
 
 // Rate limiters
-// Global rate limiter: 4,000 requests per minute for Gemini
-export const geminiRateLimiter = new RateLimiter(4000, 60 * 1000)
+// Gemini rate limiter - Tier 1 Paid limits:
+// - gemini-2.0-flash-lite: 2,000 RPM
+// - gemini-embedding-001: 1,500 RPM
+// Using 1,000 RPM as default (conservative buffer for both models combined)
+// Set GEMINI_RATE_LIMIT env var to adjust based on your tier
+export const geminiRateLimiter = new RateLimiter(
+  Number(process.env.GEMINI_RATE_LIMIT) || 1000, // Tier 1 default
+  60 * 1000
+)
 
 // Google Drive rate limiter: 10,000 requests per minute (buffer for 12,000 quota)
 export const driveRateLimiter = new RateLimiter(10000, 60 * 1000)

@@ -589,6 +589,9 @@ export const imageWorker = new Worker(
       if (successfulCaptions.length > 0) {
         console.log(`🧮 Phase 2: Generating ${successfulCaptions.length} batch embeddings`)
         
+        // Rate limit before batch embedding to avoid 429 errors
+        await geminiRateLimiter.waitIfNeeded()
+        
         const textsToEmbed = successfulCaptions.map(r => r.caption)
         const embeddings = await generateBatchEmbeddings(textsToEmbed)
         
@@ -646,7 +649,7 @@ export const imageWorker = new Worker(
   },
   {
     connection,
-    concurrency: 3, // Lower to avoid worker restarts on Railway
+    concurrency: Number(process.env.IMAGE_WORKER_CONCURRENCY) || 2, // Configurable, default 2 to avoid API throttling
     // Stalled job handling - critical for Railway restarts
     lockDuration: 300000, // 5 minutes - image processing can take time
     stalledInterval: 30000, // Check for stalled jobs every 30 seconds
