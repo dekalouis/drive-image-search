@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai"
+import { GoogleGenAI } from "@google/genai"
 import sharp from "sharp"
 import { getDownloadUrl, getAuthenticatedDownloadUrl, getDriveClient } from "@/lib/drive"
 
@@ -8,7 +8,7 @@ function getGeminiClient() {
     throw new Error("GEMINI_API_KEY environment variable is required")
   }
 
-  return new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 }
 
 // Download image from Google Drive with retry logic and timeout protection
@@ -158,7 +158,7 @@ any readable text or logos exactly as written, and notable details.
 End with a comma-separated keyword list of 10-15 search terms.
 Be exhaustive but concise. 100-150 tokens max. Neutral language. Say "uncertain" if unsure.`
 
-// Caption an image using Gemini 2.5 Flash with comprehensive analysis
+// Caption an image using Gemini 2.0 Flash with comprehensive analysis
 export async function captionImage(
   fileId: string,
   mimeType: string,
@@ -167,8 +167,6 @@ export async function captionImage(
   caption: string
 }> {
   const genAI = getGeminiClient()
-  // Use gemini-2.5-flash for best captioning quality
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" })
 
   try {
     // Download the image (prefer thumbnail for speed)
@@ -183,25 +181,34 @@ export async function captionImage(
 
     // Generate content with dense prompt
     const aiStart = Date.now()
-    const result = await model.generateContent([
-      DENSE_CAPTION_PROMPT,
-      {
-        inlineData: {
-          data: resizedBuffer.toString("base64"),
-          mimeType: "image/jpeg", // Always use JPEG after resize
+    const result = await genAI.models.generateContent({
+      model: "gemini-2.0-flash-lite",
+      contents: [
+        DENSE_CAPTION_PROMPT,
+        {
+          inlineData: {
+            data: resizedBuffer.toString("base64"),
+            mimeType: "image/jpeg", // Always use JPEG after resize
+          },
         },
-      },
-    ])
+      ],
+    })
     const aiTime = Date.now() - aiStart
     console.log(`⏱️  AI analysis time for ${fileId}: ${aiTime}ms`)
 
-    const response = await result.response
-    const text = response.text()
+    // Extract text from response - handle both SDK formats
+    let text = ""
+    const resultAsUnknown = result as unknown
+    if (typeof (resultAsUnknown as Record<string, unknown>).text === "string") {
+      text = (resultAsUnknown as Record<string, string>).text
+    } else if (result.candidates && result.candidates[0]?.content?.parts?.[0]?.text) {
+      text = result.candidates[0].content.parts[0].text
+    }
 
     // Parse flat text response and extract caption only
     try {
       const cleanedText = text.trim()
-      const lines = cleanedText.split('\n').filter(line => line.trim().length > 0)
+      const lines = cleanedText.split('\n').filter((line: string) => line.trim().length > 0)
 
       if (lines.length === 0) {
         throw new Error("Empty response from AI")
@@ -251,22 +258,31 @@ export function normalizeTextForEmbedding(text: string): string {
 }
 
 // Generate text embedding for search
-export async function generateTextEmbedding(text: string, normalize: boolean = true): Promise<number[]> {
+export async function generateTextEmbedding(
+  text: string,
+  normalize: boolean = true,
+  taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_DOCUMENT"
+): Promise<number[]> {
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" })
 
   try {
     // Normalize text for consistent embedding matching
     const processedText = normalize ? normalizeTextForEmbedding(text) : text
 
-    const result = await model.embedContent(processedText)
-    const embedding = result.embedding
+    const result = await genAI.models.embedContent({
+      model: "gemini-embedding-001",
+      contents: processedText,
+      config: {
+        outputDimensionality: 768,
+        taskType: taskType,
+      },
+    })
 
-    if (!embedding.values || embedding.values.length === 0) {
+    if (!result.embeddings || result.embeddings.length === 0 || !result.embeddings[0].values) {
       throw new Error("Empty embedding returned")
     }
 
-    return embedding.values
+    return result.embeddings[0].values
   } catch (error) {
     console.error("Embedding generation error:", error)
     throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : "Unknown error"}`)
@@ -275,8 +291,8 @@ export async function generateTextEmbedding(text: string, normalize: boolean = t
 
 // Generate embeddings for caption only
 export async function generateCaptionEmbedding(caption: string): Promise<number[]> {
-  // Use caption only for embedding
-  return generateTextEmbedding(caption, true)
+  // Use caption only for embedding with RETRIEVAL_DOCUMENT task type for stored documents
+  return generateTextEmbedding(caption, true, "RETRIEVAL_DOCUMENT")
 }
 
 // Generate batch embeddings for multiple texts in a single API call
@@ -286,40 +302,34 @@ export async function generateBatchEmbeddings(texts: string[]): Promise<number[]
   }
 
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" })
 
   try {
     const batchStart = Date.now()
     console.log(`📦 Generating batch embeddings for ${texts.length} texts`)
 
-    // Check if SDK supports batchEmbedContents
-    const modelWithBatch = model as unknown as { batchEmbedContents?: (config: unknown) => Promise<{ embeddings: Array<{ values: number[] }> }> }
-    if (modelWithBatch.batchEmbedContents) {
-      // Use batchEmbedContents if available
-      const requests = texts.map(text => ({
-        content: { parts: [{ text: normalizeTextForEmbedding(text) }] }
-      }))
+    // Normalize all texts
+    const normalizedTexts = texts.map(text => normalizeTextForEmbedding(text))
 
-      const batchResult = await modelWithBatch.batchEmbedContents({
-        requests
-      })
+    // Use the embedContent method with array of contents
+    const result = await genAI.models.embedContent({
+      model: "gemini-embedding-001",
+      contents: normalizedTexts,
+      config: {
+        outputDimensionality: 768,
+        taskType: "RETRIEVAL_DOCUMENT",
+      },
+    })
 
-      const batchTime = Date.now() - batchStart
-      console.log(`⏱️  Batch embedding time for ${texts.length} texts: ${batchTime}ms`)
-
-      return batchResult.embeddings.map((embedding) => embedding.values)
-    } else {
-      // Fallback to Promise.all with individual calls if batch API not available
-      console.log(`⚠️  Batch API not available, using Promise.all with individual calls`)
-      const embeddings = await Promise.all(
-        texts.map(text => generateTextEmbedding(text, true))
-      )
-
-      const batchTime = Date.now() - batchStart
-      console.log(`⏱️  Promise.all embedding time for ${texts.length} texts: ${batchTime}ms`)
-
-      return embeddings
+    if (!result.embeddings || result.embeddings.length === 0) {
+      throw new Error("Empty embeddings returned from batch call")
     }
+
+    const batchTime = Date.now() - batchStart
+    console.log(`⏱️  Batch embedding time for ${texts.length} texts: ${batchTime}ms`)
+
+    return result.embeddings
+      .map((embedding) => embedding.values)
+      .filter((values): values is number[] => values !== undefined)
   } catch (error) {
     console.error("Batch embedding generation error:", error)
     throw new Error(`Failed to generate batch embeddings: ${error instanceof Error ? error.message : "Unknown error"}`)
@@ -336,7 +346,6 @@ export async function extractImageTags(
   quickDescription?: string
 }> {
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" })
 
   // Retry configuration for network failures
   const maxRetries = 3
@@ -376,19 +385,28 @@ Return ONLY a JSON object with this exact format:
 }`
 
       const aiStart = Date.now()
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            data: base64Image,
-            mimeType: mimeType,
+      const result = await genAI.models.generateContent({
+        model: "gemini-2.0-flash-lite",
+        contents: [
+          {
+            inlineData: {
+              data: base64Image,
+              mimeType: mimeType,
+            },
           },
-        },
-        prompt,
-      ])
+          prompt,
+        ],
+      })
       const aiTime = Date.now() - aiStart
 
-      const response = await result.response
-      const text = response.text()
+      // Extract text from response - handle both SDK formats
+      let text = ""
+      const resultAsUnknown = result as unknown
+      if (typeof (resultAsUnknown as Record<string, unknown>).text === "string") {
+        text = (resultAsUnknown as Record<string, string>).text
+      } else if (result.candidates && result.candidates[0]?.content?.parts?.[0]?.text) {
+        text = result.candidates[0].content.parts[0].text
+      }
       console.log(`⏱️  AI processing time: ${aiTime}ms`)
 
       try {
@@ -409,8 +427,8 @@ Return ONLY a JSON object with this exact format:
         // Fallback: extract tags from text
         const fallbackTags = text
           .split(',')
-          .map(tag => tag.trim().replace(/[^\w\s]/g, ''))
-          .filter(tag => tag.length > 0)
+          .map((tag: string) => tag.trim().replace(/[^\w\s]/g, ''))
+          .filter((tag: string) => tag.length > 0)
           .slice(0, 8)
 
         return {

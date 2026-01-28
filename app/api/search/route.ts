@@ -152,7 +152,7 @@ export async function POST(request: NextRequest) {
       console.log(`🔍 Semantic search query: "${trimmedQuery}" -> normalized: "${normalizedQuery}"`)
       
       const startTime = Date.now()
-      const queryEmbedding = await generateTextEmbedding(normalizedQuery)
+      const queryEmbedding = await generateTextEmbedding(normalizedQuery, false, "RETRIEVAL_QUERY")
       embeddingTime = Date.now() - startTime
       console.log(`⏱️ Embedding generation: ${embeddingTime}ms`)
 
@@ -181,9 +181,9 @@ export async function POST(request: NextRequest) {
       `
       searchTime = Date.now() - searchStart
       console.log(`⏱️ pgvector search: ${searchTime}ms (found ${results.length} results)`)
-      } catch (error: any) {
+      } catch (error) {
         // If pgvector is not available, fallback to filename search
-        const errorMessage = error?.message || String(error)
+        const errorMessage = error instanceof Error ? error.message : String(error)
         if (errorMessage.includes('pgvector') || errorMessage.includes('vector') || errorMessage.includes('extension')) {
           console.warn(`⚠️  pgvector not available, falling back to filename search: ${errorMessage}`)
           fallbackMode = true  // Set fallback flag
