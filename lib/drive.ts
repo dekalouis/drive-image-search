@@ -224,8 +224,24 @@ export async function listImagesRecursively(
       })
       const folderName = folderResponse.data.name || null
 
+      // Depth and file limits for recursive scan (ARCH-005)
+      const MAX_DEPTH = 10
+      const MAX_FILES = 1000
+
       // Helper function to recursively scan folders
-      async function scanFolder(currentFolderId: string, nextPageToken?: string): Promise<void> {
+      async function scanFolder(currentFolderId: string, depth = 0, nextPageToken?: string): Promise<void> {
+        // Enforce depth limit
+        if (depth > MAX_DEPTH) {
+          console.warn(`⚠️  Max folder depth (${MAX_DEPTH}) reached, stopping recursion`)
+          return
+        }
+
+        // Enforce file count limit
+        if (allImages.length >= MAX_FILES) {
+          console.warn(`⚠️  Max file limit (${MAX_FILES}) reached, stopping scan`)
+          return
+        }
+
         // Only process Gemini-supported image MIME types
         // Gemini 2.5 Flash supports: JPEG, PNG, GIF, WebP, BMP, SVG
         // Does NOT support: AVIF, HEIC, HEIF, TIFF, etc.
@@ -253,19 +269,25 @@ export async function listImagesRecursively(
         const files = response.data.files || []
 
         for (const file of files) {
+          // Stop if we've hit the file limit
+          if (allImages.length >= MAX_FILES) {
+            console.warn(`⚠️  Max file limit (${MAX_FILES}) reached mid-scan, stopping`)
+            return
+          }
+
           // Only add supported image types (already filtered by query, but double-check)
           if (file.mimeType && supportedImageTypes.includes(file.mimeType)) {
             allImages.push(file)
           } else if (file.mimeType === "application/vnd.google-apps.folder" && file.id) {
             // It's a subfolder - recursively scan it
-            console.log(`📂 Scanning subfolder: ${file.name}`)
-            await scanFolder(file.id)
+            console.log(`📂 Scanning subfolder: ${file.name} (depth: ${depth + 1})`)
+            await scanFolder(file.id, depth + 1)
           }
         }
 
-        // Handle pagination
-        if (response.data.nextPageToken) {
-          await scanFolder(currentFolderId, response.data.nextPageToken)
+        // Handle pagination (only if under limits)
+        if (response.data.nextPageToken && allImages.length < MAX_FILES) {
+          await scanFolder(currentFolderId, depth, response.data.nextPageToken)
         }
       }
 

@@ -7,5 +7,7 @@ cmds = ["npm run build"]
 [start]
 cmd = "npm run start"
 
-
-
+# NOTE (ARCH-013): Workers must be deployed as a SEPARATE Railway service.
+# In the Railway dashboard, create a second service from the same repo
+# and set its start command to: npm run workers
+# Do NOT run workers in the same process as the Next.js web server.
