@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Drive Image Searcher",
-  description: "Search and organize your Google Drive images",
+  title: "ImageSearch",
+  description: "Search through your Google Drive images using AI-powered semantic search",
 };
 
 // Make layout dynamic to avoid static generation issues with Clerk

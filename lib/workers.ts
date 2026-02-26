@@ -246,9 +246,22 @@ export const folderWorker = new Worker(
   },
 )
 
+// Invalidate stored OAuth token so recovery won't keep re-queuing with a bad token
+async function invalidateFolderToken(folderId: string) {
+  try {
+    await prisma.folder.update({
+      where: { id: folderId },
+      data: { accessTokenEncrypted: null, tokenExpiresAt: new Date(0) },
+    })
+    console.log(`🔒 Invalidated stored token for folder ${folderId} (401 - re-add folder while logged in to retry)`)
+  } catch (e) {
+    console.warn(`⚠️  Failed to invalidate token for folder ${folderId}:`, e)
+  }
+}
+
 // Helper function to generate caption for a single image
 async function processImageCaption(image: { imageId: string, fileId: string, etag: string, folderId: string, mimeType?: string, name?: string, accessToken?: string }): Promise<{ success: boolean; imageId: string; fileId: string; caption?: string; error?: string }> {
-  const { imageId, fileId, mimeType: providedMimeType, accessToken } = image
+  const { imageId, fileId, folderId, mimeType: providedMimeType, accessToken } = image
   
   try {
     // Get image mime type if not provided
@@ -281,6 +294,10 @@ async function processImageCaption(image: { imageId: string, fileId: string, eta
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    // If token was used and we got 401, invalidate stored token so recovery stops re-queuing with it
+    if (accessToken && (errorMessage.includes("401") || errorMessage.includes("Unauthorized"))) {
+      await invalidateFolderToken(folderId)
+    }
     return {
       success: false,
       imageId,

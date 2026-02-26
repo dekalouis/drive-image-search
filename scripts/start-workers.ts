@@ -50,6 +50,22 @@ async function recoverPendingImages() {
     for (const folder of foldersWithPending) {
       if (folder.images.length === 0) continue
 
+      // For private folders: skip re-queuing if token is expired so we don't spin with 401s
+      let accessToken: string | undefined = undefined
+      if (folder.accessTokenEncrypted && folder.tokenExpiresAt) {
+        if (new Date() >= folder.tokenExpiresAt) {
+          console.warn(`⏭️  Skipping folder ${folder.folderId}: token expired. Re-add the folder while logged in to retry.`)
+          continue
+        }
+        try {
+          accessToken = decrypt(folder.accessTokenEncrypted)
+          console.log(`🔑 Using stored token for folder ${folder.folderId}`)
+        } catch (e) {
+          console.warn(`⏭️  Skipping folder ${folder.folderId}: failed to decrypt token. Re-add the folder while logged in.`)
+          continue
+        }
+      }
+
       console.log(`🔄 Re-queuing ${folder.images.length} pending images for folder ${folder.folderId}`)
 
       // Update folder status to processing
@@ -70,26 +86,11 @@ async function recoverPendingImages() {
           mimeType: img.mimeType,
           name: img.name
         }))
-        
-        // Get stored token if available
-        let accessToken: string | undefined = undefined
-        if (folder.accessTokenEncrypted && folder.tokenExpiresAt) {
-          if (new Date() < folder.tokenExpiresAt) {
-            try {
-              accessToken = decrypt(folder.accessTokenEncrypted)
-              console.log(`🔑 Using stored token for folder ${folder.folderId}`)
-            } catch (e) {
-              console.warn(`⚠️  Failed to decrypt token for folder ${folder.folderId}`)
-            }
-          } else {
-            console.warn(`⚠️  Token expired for folder ${folder.folderId}`)
-          }
-        }
-        
+
         await queueImageBatch({
           images: batchData,
           folderId: folder.id,
-          accessToken // Now properly set!
+          accessToken,
         })
       }
 

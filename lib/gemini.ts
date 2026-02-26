@@ -250,16 +250,26 @@ export function normalizeTextForEmbedding(text: string): string {
     .replace(/\s+/g, ' ')
 }
 
+// Embedding model: gemini-embedding-001 (text-embedding-004/005 deprecated). Output 768 to match DB column.
+const EMBEDDING_MODEL = "gemini-embedding-001"
+const EMBEDDING_OUTPUT_DIMENSION = 768
+
 // Generate text embedding for search
 export async function generateTextEmbedding(text: string, normalize: boolean = true): Promise<number[]> {
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
+  const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL })
 
   try {
     // Normalize text for consistent embedding matching
     const processedText = normalize ? normalizeTextForEmbedding(text) : text
 
-    const result = await model.embedContent(processedText)
+    // outputDimensionality supported by gemini-embedding-001 (768 matches DB captionVec)
+    const result = await model.embedContent(
+      {
+        content: { role: "user", parts: [{ text: processedText }] },
+        outputDimensionality: EMBEDDING_OUTPUT_DIMENSION,
+      } as unknown as Parameters<typeof model.embedContent>[0]
+    )
     const embedding = result.embedding
 
     if (!embedding.values || embedding.values.length === 0) {
@@ -286,7 +296,7 @@ export async function generateBatchEmbeddings(texts: string[]): Promise<number[]
   }
 
   const genAI = getGeminiClient()
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" })
+  const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL })
 
   try {
     const batchStart = Date.now()
@@ -295,9 +305,10 @@ export async function generateBatchEmbeddings(texts: string[]): Promise<number[]
     // Check if SDK supports batchEmbedContents
     const modelWithBatch = model as unknown as { batchEmbedContents?: (config: unknown) => Promise<{ embeddings: Array<{ values: number[] }> }> }
     if (modelWithBatch.batchEmbedContents) {
-      // Use batchEmbedContents if available
+      // Use batchEmbedContents if available (with outputDimensionality for gemini-embedding-001)
       const requests = texts.map(text => ({
-        content: { parts: [{ text: normalizeTextForEmbedding(text) }] }
+        content: { role: "user", parts: [{ text: normalizeTextForEmbedding(text) }] },
+        outputDimensionality: EMBEDDING_OUTPUT_DIMENSION,
       }))
 
       const batchResult = await modelWithBatch.batchEmbedContents({
