@@ -33,8 +33,15 @@ export default function RootLayout({
     clerkPublishableKey !== 'pk_test_your_publishable_key_here' &&
     clerkPublishableKey.startsWith('pk_');
   
-  // Always render ClerkProvider if we have a valid key, even if it might fail at runtime
-  // This ensures Clerk components can be used
+  // In production, Clerk keys are required (SEC-012)
+  if (!hasValidClerkKey && process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is missing or invalid. ' +
+      'Authentication cannot be configured. Set the environment variable and redeploy.'
+    )
+  }
+
+  // Always render ClerkProvider if we have a valid key
   if (hasValidClerkKey) {
     return (
       <ClerkProvider publishableKey={clerkPublishableKey}>
@@ -50,7 +57,7 @@ export default function RootLayout({
     );
   }
 
-  // No Clerk key - render without ClerkProvider
+  // No Clerk key in development - render without ClerkProvider
   return (
     <html lang="en">
       <body

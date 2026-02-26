@@ -18,9 +18,7 @@ if npx prisma migrate deploy; then
   echo "✅ Database migrations completed successfully"
   exit 0
 else
-  echo "❌ Migration failed"
-  echo "⚠️  Continuing deployment - migrations can be run manually if needed"
-  # Exit with 0 to not block deployment
-  exit 0
+  echo "❌ Migration failed - deployment halted"
+  exit 1
 fi
 

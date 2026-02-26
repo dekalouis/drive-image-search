@@ -94,9 +94,16 @@ export default function FolderPage() {
 
   useEffect(() => {
     fetchFolderData()
-    const interval = setInterval(fetchFolderData, 2000) // Poll every 2 seconds
+
+    // ARCH-010: Stop polling once folder reaches a terminal state
+    const TERMINAL_STATUSES = ['completed', 'completed_with_errors', 'failed']
+    if (folder && TERMINAL_STATUSES.includes(folder.status)) {
+      return // No interval — folder is done
+    }
+
+    const interval = setInterval(fetchFolderData, 5000) // Poll every 5 seconds
     return () => clearInterval(interval)
-  }, [folderId, fetchFolderData])
+  }, [folderId, fetchFolderData, folder?.status])
 
   // Reset to first page when search results change
   useEffect(() => {

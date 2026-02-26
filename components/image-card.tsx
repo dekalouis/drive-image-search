@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Image as ImageIcon, Loader2, RefreshCw, ExternalLink, AlertCircle, Maximize2 } from "lucide-react"
 import Image from 'next/image'
+import { cleanCaption } from "@/lib/caption-utils"
 
 export interface ImageData {
     id: string
@@ -67,37 +68,6 @@ export function ImageCard({ image, onRetry, retryingImages, onSelect }: ImageCar
     setImageError(false)
     setIsLoading(true)
     onRetry(image.id)
-  }
-
-  // Clean caption - remove JSON formatting if present
-  const cleanCaption = (caption?: string) => {
-    if (!caption) return null
-    
-    // Handle HTML-encoded JSON strings
-    let cleanedCaption = caption
-    
-    // Decode HTML entities first
-    if (caption.includes('&quot;')) {
-      cleanedCaption = caption.replace(/&quot;/g, '"')
-    }
-    
-    // Remove markdown code blocks if present
-    if (cleanedCaption.startsWith('```json') && cleanedCaption.endsWith('```')) {
-      cleanedCaption = cleanedCaption.replace(/^```json\n/, '').replace(/\n```$/, '')
-    }
-    
-    // If caption contains JSON structure, extract just the caption text
-    if (cleanedCaption.includes('"caption"')) {
-      try {
-        const parsed = JSON.parse(cleanedCaption)
-        return parsed.caption || caption
-      } catch {
-        // If parsing fails, return as is
-        return caption
-      }
-    }
-    
-    return cleanedCaption
   }
 
   const displayCaption = cleanCaption(image.caption)

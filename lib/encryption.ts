@@ -1,33 +1,34 @@
 import crypto from 'crypto'
 
 const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY
-const IV_LENGTH = 16
+const IV_LENGTH = 12 // 12 bytes is standard for AES-256-GCM
 
 /**
- * Encrypt a string using AES-256-CBC
+ * Encrypt a string using AES-256-GCM (SEC-003)
  * @param text The text to encrypt
- * @returns Encrypted string in format: iv:encryptedData (both as hex)
+ * @returns Encrypted string in format: iv_hex:authTag_hex:ciphertext_hex (3 parts)
  */
 export function encrypt(text: string): string {
   if (!ENCRYPTION_KEY) {
     throw new Error('TOKEN_ENCRYPTION_KEY environment variable is not set')
   }
 
-  // Validate key is 32 bytes (64 hex characters)
   if (ENCRYPTION_KEY.length !== 64) {
     throw new Error('TOKEN_ENCRYPTION_KEY must be 32 bytes (64 hex characters)')
   }
 
   const iv = crypto.randomBytes(IV_LENGTH)
-  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY, 'hex'), iv)
-  let encrypted = cipher.update(text)
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(ENCRYPTION_KEY, 'hex'), iv)
+  let encrypted = cipher.update(text, 'utf8')
   encrypted = Buffer.concat([encrypted, cipher.final()])
-  return iv.toString('hex') + ':' + encrypted.toString('hex')
+  const authTag = cipher.getAuthTag()
+
+  return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted.toString('hex')
 }
 
 /**
- * Decrypt a string encrypted with AES-256-CBC
- * @param encryptedText The encrypted string in format: iv:encryptedData (both as hex)
+ * Decrypt a string encrypted with AES-256-GCM (SEC-003)
+ * @param encryptedText The encrypted string in format: iv_hex:authTag_hex:ciphertext_hex
  * @returns The decrypted text
  */
 export function decrypt(encryptedText: string): string {
@@ -35,22 +36,26 @@ export function decrypt(encryptedText: string): string {
     throw new Error('TOKEN_ENCRYPTION_KEY environment variable is not set')
   }
 
-  // Validate key is 32 bytes (64 hex characters)
   if (ENCRYPTION_KEY.length !== 64) {
     throw new Error('TOKEN_ENCRYPTION_KEY must be 32 bytes (64 hex characters)')
   }
 
-  const [ivHex, encryptedHex] = encryptedText.split(':')
-  if (!ivHex || !encryptedHex) {
-    throw new Error('Invalid encrypted text format. Expected: iv:encryptedData')
+  const parts = encryptedText.split(':')
+  if (parts.length !== 3) {
+    throw new Error('Invalid encrypted text format. Expected: iv:authTag:ciphertext')
   }
 
+  const [ivHex, authTagHex, encryptedHex] = parts
   const iv = Buffer.from(ivHex, 'hex')
+  const authTag = Buffer.from(authTagHex, 'hex')
   const encrypted = Buffer.from(encryptedHex, 'hex')
-  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY, 'hex'), iv)
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(ENCRYPTION_KEY, 'hex'), iv)
+  decipher.setAuthTag(authTag)
+
   let decrypted = decipher.update(encrypted)
   decrypted = Buffer.concat([decrypted, decipher.final()])
-  return decrypted.toString()
+  return decrypted.toString('utf8')
 }
 
 /**

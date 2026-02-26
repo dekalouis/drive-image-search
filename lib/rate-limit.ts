@@ -1,16 +1,13 @@
 /**
- * Simple in-memory rate limiter using sliding window approach
- * Perfect for single-instance deployments. Can be upgraded to Redis for distributed systems.
+ * Redis-backed rate limiter using INCR + PEXPIRE sliding window (ARCH-002)
+ * Shared across all instances — safe for multi-instance deployments.
  */
+
+import { redisConnection } from '@/lib/queue'
 
 interface RateLimitConfig {
   maxRequests: number
   windowMs: number
-}
-
-interface RateLimitEntry {
-  count: number
-  resetAt: number
 }
 
 interface RateLimitResult {
@@ -19,84 +16,115 @@ interface RateLimitResult {
   resetAt: number
 }
 
-/**
- * In-memory rate limiter with sliding window
- */
 class RateLimiter {
-  private store = new Map<string, RateLimitEntry>()
   private config: RateLimitConfig
+  private prefix: string
 
-  constructor(maxRequests: number, windowMs: number) {
+  constructor(maxRequests: number, windowMs: number, prefix: string) {
     this.config = { maxRequests, windowMs }
-    // Cleanup expired entries every minute
-    setInterval(() => this.cleanup(), 60 * 1000)
+    this.prefix = prefix
   }
 
   async check(identifier: string): Promise<RateLimitResult> {
+    const key = `rl:${this.prefix}:${identifier}`
     const now = Date.now()
-    const entry = this.store.get(identifier)
+    const resetAt = now + this.config.windowMs
 
-    if (!entry || now >= entry.resetAt) {
-      // Create new window
-      const resetAt = now + this.config.windowMs
-      this.store.set(identifier, { count: 1, resetAt })
+    try {
+      // INCR atomically increments (creates key at 1 if missing)
+      const count = await redisConnection.incr(key)
+      if (count === 1) {
+        // First request in window — set TTL
+        await redisConnection.pexpire(key, this.config.windowMs)
+      }
+
+      const allowed = count <= this.config.maxRequests
+      const remaining = Math.max(0, this.config.maxRequests - count)
+
+      // Get actual TTL to report accurate resetAt
+      let ttlMs: number
+      try {
+        const pttl = await redisConnection.pttl(key)
+        ttlMs = pttl > 0 ? pttl : this.config.windowMs
+      } catch {
+        ttlMs = this.config.windowMs
+      }
+
+      return {
+        allowed,
+        remaining,
+        resetAt: now + ttlMs,
+      }
+    } catch (err) {
+      // If Redis is unavailable, fail open (allow request) to avoid a Redis outage
+      // blocking all traffic — log the error for alerting
+      console.error(`⚠️  Rate limiter Redis error for key ${key}:`, err)
       return {
         allowed: true,
-        remaining: this.config.maxRequests - 1,
+        remaining: this.config.maxRequests,
         resetAt,
       }
     }
-
-    if (entry.count >= this.config.maxRequests) {
-      return {
-        allowed: false,
-        remaining: 0,
-        resetAt: entry.resetAt,
-      }
-    }
-
-    entry.count++
-    return {
-      allowed: true,
-      remaining: this.config.maxRequests - entry.count,
-      resetAt: entry.resetAt,
-    }
-  }
-
-  private cleanup() {
-    const now = Date.now()
-    let cleaned = 0
-    for (const [key, entry] of this.store.entries()) {
-      if (now >= entry.resetAt) {
-        this.store.delete(key)
-        cleaned++
-      }
-    }
-    if (cleaned > 0) {
-      console.log(`🧹 Rate limiter cleanup: removed ${cleaned} expired entries`)
-    }
   }
 }
 
-// Create rate limiters for different endpoints
-export const searchRateLimiter = new RateLimiter(60, 60 * 1000) // 60 requests per minute
-export const folderRateLimiter = new RateLimiter(30, 60 * 1000) // 30 requests per minute
-export const imageRateLimiter = new RateLimiter(100, 60 * 1000) // 100 requests per minute
-export const ingestRateLimiter = new RateLimiter(10, 60 * 1000) // 10 requests per minute (expensive)
-export const defaultRateLimiter = new RateLimiter(100, 60 * 1000) // 100 requests per minute
+// Private IP ranges — RFC 1918, loopback, link-local
+const PRIVATE_IP_PATTERNS = [
+  /^127\./,
+  /^10\./,
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+  /^192\.168\./,
+  /^::1$/,
+  /^fc00:/,
+  /^fd[0-9a-f]{2}:/i,
+  /^fe80:/i,
+]
+
+function isPrivateIp(ip: string): boolean {
+  return PRIVATE_IP_PATTERNS.some(pattern => pattern.test(ip))
+}
 
 /**
- * Get client identifier from request headers (IP address)
- * Handles X-Forwarded-For and X-Real-IP headers for proxy scenarios
+ * Extract the real client IP from a request.
+ * Railway (and most reverse proxies) append the real client IP as the LAST entry
+ * in X-Forwarded-For, so we take the rightmost non-private IP (SEC-004).
  */
 export function getClientIdentifier(request: Request): string {
-  // Try to get IP from headers (works with most proxies)
   const forwarded = request.headers.get('x-forwarded-for')
   const realIp = request.headers.get('x-real-ip')
-  const ip = forwarded?.split(',')[0]?.trim() || realIp?.trim() || 'unknown'
-  
-  return ip
+
+  if (forwarded) {
+    // Split and iterate from right to left — last non-private IP is the real one
+    const ips = forwarded.split(',').map(ip => ip.trim()).filter(Boolean)
+    for (let i = ips.length - 1; i >= 0; i--) {
+      if (!isPrivateIp(ips[i])) {
+        return ips[i]
+      }
+    }
+  }
+
+  if (realIp && !isPrivateIp(realIp.trim())) {
+    return realIp.trim()
+  }
+
+  return 'unknown'
 }
+
+/**
+ * Get client identifier preferring authenticated user ID over IP.
+ * Use for routes where users are expected to be logged in.
+ */
+export function getClientIdentifierForUser(request: Request, userId?: string | null): string {
+  if (userId) return `user:${userId}`
+  return getClientIdentifier(request)
+}
+
+// Rate limiter instances (SEC-004 / ARCH-002)
+export const searchRateLimiter = new RateLimiter(60, 60 * 1000, 'search')
+export const folderRateLimiter = new RateLimiter(30, 60 * 1000, 'folder')
+export const imageRateLimiter = new RateLimiter(100, 60 * 1000, 'image')
+export const ingestRateLimiter = new RateLimiter(10, 60 * 1000, 'ingest')
+export const defaultRateLimiter = new RateLimiter(100, 60 * 1000, 'default')
 
 /**
  * Check rate limit for a given identifier using specified limiter

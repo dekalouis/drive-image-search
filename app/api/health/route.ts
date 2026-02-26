@@ -1,8 +1,12 @@
-import { NextResponse } from "next/server"
+import { type NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { healthCheck as queueHealthCheck } from "@/lib/queue"
+import { checkAdminAuth } from "@/lib/admin-auth"
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = checkAdminAuth(request)
+  if (authError) return authError
+
   const startTime = Date.now()
   
   try {
