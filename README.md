@@ -1,5 +1,6 @@
 # THIS IS AN OLDER VERSION, the newer version could be tested here:
-[https://imgsearch-ai.vercel.app/](https://imgsearch-ai.vercel.app/)
+[https://imgsearch.online/](https://imgsearch.online/)
+
 Updated to be a FastAPI + PostgreSQL/pgvector backend running on Railway with an ARQ worker that indexes Google Drive images via Modal's serverless GPU (CLIP ViT-L/14), storing embeddings and WebP thumbnails on Cloudflare R2. The frontend is a Next.js/TypeScript app on Vercel with Clerk auth and a server-side proxy that keeps all secrets off the browser.
 
 # Google Drive Image Searcher
