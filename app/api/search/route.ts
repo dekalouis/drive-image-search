@@ -3,37 +3,10 @@ import { prisma } from "@/lib/prisma"
 import { ensurePgvectorExtension } from "@/lib/db-init"
 import { generateTextEmbedding, normalizeTextForEmbedding } from "@/lib/gemini"
 import { searchRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
+import { validateFolderAccess } from "@/lib/folder-auth"
+import { cleanCaption } from "@/lib/caption-utils"
 
-// Helper function to clean captions
-function cleanCaption(caption?: string | null): string | null {
-  if (!caption) return null
-  
-  // Handle HTML-encoded JSON strings
-  let cleanedCaption = caption
-  
-  // Decode HTML entities first
-  if (caption.includes('&quot;')) {
-    cleanedCaption = caption.replace(/&quot;/g, '"')
-  }
-  
-  // Remove markdown code blocks if present
-  if (cleanedCaption.startsWith('```json') && cleanedCaption.endsWith('```')) {
-    cleanedCaption = cleanedCaption.replace(/^```json\n/, '').replace(/\n```$/, '')
-  }
-  
-  // If caption contains JSON structure, extract just the caption text
-  if (cleanedCaption.includes('"caption"')) {
-    try {
-      const parsed = JSON.parse(cleanedCaption)
-      return parsed.caption || caption
-    } catch {
-      // If parsing fails, return as is
-      return caption
-    }
-  }
-  
-  return caption
-}
+const MAX_QUERY_LENGTH = 500
 
 // Convert embedding array to pgvector format string
 function toVectorString(embedding: number[]): string {
@@ -73,14 +46,31 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { folderId, query, topK = 12 } = await request.json()
+    const { folderId, query, topK = 12, searchType } = await request.json()
 
     if (!folderId || !query) {
       return NextResponse.json({ error: "folderId and query are required" }, { status: 400 })
     }
 
+    // Validate folder access (SEC-002)
+    const { folder: folderRecord, hasAccess } = await validateFolderAccess(folderId)
+    if (!folderRecord) {
+      return NextResponse.json({ error: "Folder not found" }, { status: 404 })
+    }
+    if (!hasAccess) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    }
+
     if (typeof query !== "string" || query.trim().length === 0) {
       return NextResponse.json({ error: "Query must be a non-empty string" }, { status: 400 })
+    }
+
+    // Enforce maximum query length (ARCH-009)
+    if (query.length > MAX_QUERY_LENGTH) {
+      return NextResponse.json(
+        { error: `Query must not exceed ${MAX_QUERY_LENGTH} characters` },
+        { status: 400 }
+      )
     }
 
     // Validate topK
@@ -88,8 +78,16 @@ export async function POST(request: NextRequest) {
 
     const trimmedQuery = query.trim()
     
-    // Check if query looks like a filename search (contains file extension or is short)
-    const isFilenameSearch = trimmedQuery.includes('.') || trimmedQuery.length < 3
+    // Determine search type: use provided searchType or fallback to auto-detection
+    let isFilenameSearch: boolean
+    if (searchType === 'semantic') {
+      isFilenameSearch = false
+    } else if (searchType === 'filename') {
+      isFilenameSearch = true
+    } else {
+      // Auto-detection: check if query looks like a filename search (contains file extension or is short)
+      isFilenameSearch = trimmedQuery.includes('.') || trimmedQuery.length < 3
+    }
     
     let results: SearchResult[] = []
     let searchTime = 0
@@ -144,7 +142,7 @@ export async function POST(request: NextRequest) {
       console.log(`🔍 Semantic search query: "${trimmedQuery}" -> normalized: "${normalizedQuery}"`)
       
       const startTime = Date.now()
-      const queryEmbedding = await generateTextEmbedding(normalizedQuery)
+      const queryEmbedding = await generateTextEmbedding(normalizedQuery, false, "RETRIEVAL_QUERY")
       embeddingTime = Date.now() - startTime
       console.log(`⏱️ Embedding generation: ${embeddingTime}ms`)
 
@@ -173,9 +171,9 @@ export async function POST(request: NextRequest) {
       `
       searchTime = Date.now() - searchStart
       console.log(`⏱️ pgvector search: ${searchTime}ms (found ${results.length} results)`)
-      } catch (error: any) {
+      } catch (error) {
         // If pgvector is not available, fallback to filename search
-        const errorMessage = error?.message || String(error)
+        const errorMessage = error instanceof Error ? error.message : String(error)
         if (errorMessage.includes('pgvector') || errorMessage.includes('vector') || errorMessage.includes('extension')) {
           console.warn(`⚠️  pgvector not available, falling back to filename search: ${errorMessage}`)
           fallbackMode = true  // Set fallback flag

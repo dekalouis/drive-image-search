@@ -205,66 +205,124 @@ export async function listImagesRecursively(
   count: number
   error?: string
 }> {
-  const drive = getDriveClient(oauthToken)
   const allImages: DriveFile[] = []
 
   try {
-    // Get folder metadata
-    const folderResponse = await drive.files.get({
-      fileId: folderId,
-      fields: "id,name,mimeType",
-    })
-    const folderName = folderResponse.data.name || null
+    // If an OAuth token is provided but is missing Drive scopes / belongs to a different Google user,
+    // Google Drive can return 403 even for PUBLIC folders. For public folders, API key access should work.
+    //
+    // Strategy:
+    // - Try OAuth if provided
+    // - On 403, retry once using API key (public access)
+    const tryList = async (mode: "oauth" | "apiKey") => {
+      const drive = mode === "oauth" ? getDriveClient(oauthToken) : getDriveClient()
 
-    // Helper function to recursively scan folders
-    async function scanFolder(currentFolderId: string, nextPageToken?: string): Promise<void> {
-      // Only process Gemini-supported image MIME types
-      // Gemini 2.5 Flash supports: JPEG, PNG, GIF, WebP, BMP, SVG
-      // Does NOT support: AVIF, HEIC, HEIF, TIFF, etc.
-      const supportedImageTypes = [
-        'image/jpeg',
-        'image/png',
-        'image/gif',
-        'image/webp',
-        'image/bmp',
-        'image/svg+xml'
-      ]
-
-      // List all files (images and folders) in current folder
-      // Filter for supported image types OR folders
-      const response = await drive.files.list({
-        q: `'${currentFolderId}' in parents and trashed=false and (mimeType = 'application/vnd.google-apps.folder' or ${supportedImageTypes.map(type => `mimeType='${type}'`).join(' or ')})`,
-        fields: "nextPageToken,files(id,name,mimeType,thumbnailLink,webViewLink,size,md5Checksum,modifiedTime,version)",
-        includeItemsFromAllDrives: true,
-        supportsAllDrives: true,
-        pageSize: 1000,
-        pageToken: nextPageToken,
+      // Get folder metadata
+      const folderResponse = await drive.files.get({
+        fileId: folderId,
+        fields: "id,name,mimeType",
       })
+      const folderName = folderResponse.data.name || null
 
-      const files = response.data.files || []
-      
-      for (const file of files) {
-        // Only add supported image types (already filtered by query, but double-check)
-        if (file.mimeType && supportedImageTypes.includes(file.mimeType)) {
-          allImages.push(file)
-        } else if (file.mimeType === "application/vnd.google-apps.folder" && file.id) {
-          // It's a subfolder - recursively scan it
-          console.log(`📂 Scanning subfolder: ${file.name}`)
-          await scanFolder(file.id)
+      // Depth and file limits for recursive scan (ARCH-005)
+      const MAX_DEPTH = 10
+      const MAX_FILES = 1000
+
+      // Helper function to recursively scan folders
+      async function scanFolder(currentFolderId: string, depth = 0, nextPageToken?: string): Promise<void> {
+        // Enforce depth limit
+        if (depth > MAX_DEPTH) {
+          console.warn(`⚠️  Max folder depth (${MAX_DEPTH}) reached, stopping recursion`)
+          return
+        }
+
+        // Enforce file count limit
+        if (allImages.length >= MAX_FILES) {
+          console.warn(`⚠️  Max file limit (${MAX_FILES}) reached, stopping scan`)
+          return
+        }
+
+        // Only process Gemini-supported image MIME types
+        // Gemini 2.5 Flash supports: JPEG, PNG, GIF, WebP, BMP, SVG
+        // Does NOT support: AVIF, HEIC, HEIF, TIFF, etc.
+        const supportedImageTypes = [
+          "image/jpeg",
+          "image/png",
+          "image/gif",
+          "image/webp",
+          "image/bmp",
+          "image/svg+xml",
+        ]
+
+        // List all files (images and folders) in current folder
+        // Filter for supported image types OR folders
+        const response = await drive.files.list({
+          q: `'${currentFolderId}' in parents and trashed=false and (mimeType = 'application/vnd.google-apps.folder' or ${supportedImageTypes.map((type) => `mimeType='${type}'`).join(" or ")})`,
+          fields:
+            "nextPageToken,files(id,name,mimeType,thumbnailLink,webViewLink,size,md5Checksum,modifiedTime,version)",
+          includeItemsFromAllDrives: true,
+          supportsAllDrives: true,
+          pageSize: 1000,
+          pageToken: nextPageToken,
+        })
+
+        const files = response.data.files || []
+
+        for (const file of files) {
+          // Stop if we've hit the file limit
+          if (allImages.length >= MAX_FILES) {
+            console.warn(`⚠️  Max file limit (${MAX_FILES}) reached mid-scan, stopping`)
+            return
+          }
+
+          // Only add supported image types (already filtered by query, but double-check)
+          if (file.mimeType && supportedImageTypes.includes(file.mimeType)) {
+            allImages.push(file)
+          } else if (file.mimeType === "application/vnd.google-apps.folder" && file.id) {
+            // It's a subfolder - recursively scan it
+            console.log(`📂 Scanning subfolder: ${file.name} (depth: ${depth + 1})`)
+            await scanFolder(file.id, depth + 1)
+          }
+        }
+
+        // Handle pagination (only if under limits)
+        if (response.data.nextPageToken && allImages.length < MAX_FILES) {
+          await scanFolder(currentFolderId, depth, response.data.nextPageToken)
         }
       }
 
-      // Handle pagination
-      if (response.data.nextPageToken) {
-        await scanFolder(currentFolderId, response.data.nextPageToken)
+      // Start recursive scan from root folder
+      console.log(
+        `🔍 Starting recursive scan of folder: ${folderName}${mode === "oauth" ? " (oauth)" : " (apiKey)"}`
+      )
+      await scanFolder(folderId)
+      console.log(`✅ Found ${allImages.length} total images (including subfolders)`)
+
+      return { folderName }
+    }
+
+    let folderName: string | null = null
+
+    try {
+      const result = await tryList(oauthToken ? "oauth" : "apiKey")
+      folderName = result.folderName
+    } catch (error: unknown) {
+      // If OAuth failed with 403, retry once using API key for public access.
+      const code = (error as { code?: number; status?: number } | null)?.code ?? (error as { status?: number } | null)?.status
+      if (oauthToken && (code === 403 || code === 401)) {
+        console.warn(
+          `⚠️ Drive access failed with OAuth (code ${code}). Retrying with API key for public folder access...`
+        )
+        // Reset collected images before retry
+        allImages.length = 0
+        const result = await tryList("apiKey")
+        folderName = result.folderName
+      } else {
+        throw error
       }
     }
 
-    // Start recursive scan from root folder
-    console.log(`🔍 Starting recursive scan of folder: ${folderName}`)
-    await scanFolder(folderId)
-    console.log(`✅ Found ${allImages.length} total images (including subfolders)`)
-
+    // Get folder metadata
     return {
       success: true,
       folderName,
@@ -279,8 +337,10 @@ export async function listImagesRecursively(
       if (driveError.code === 403 || driveError.code === 404) {
         let errorMessage: string
         if (oauthToken) {
-          // User is logged in with OAuth token but still can't access
-          errorMessage = "The folder isn't accessible. Please make sure you have permission to access this folder in Google Drive."
+          // OAuth was used (and may have been missing scopes). For a truly public folder, API key access should work.
+          // If we reach this point, both OAuth and API key failed, or OAuth was the only mode attempted.
+          errorMessage =
+            "Google Drive returned 'Insufficient Permission'. If this folder is public, please ensure sharing is set to 'Anyone with the link' (viewer). If it is already public, your Google connection may be missing Drive scopes; reconnect Google and grant Drive access."
         } else {
           // User is logged in but doesn't have OAuth token
           errorMessage = "This folder is private. To access private folders, you need to connect your Google account. Please check your account settings to connect Google, or make the folder public by setting it to 'Anyone with the link' (viewer)."

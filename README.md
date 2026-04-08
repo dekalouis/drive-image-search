@@ -11,7 +11,7 @@ A powerful Next.js application that allows you to search through images in Googl
 
 - 🔗 **Google Drive Integration**: Paste any Google Drive folder URL (public or private when logged in)
 - 🖼️ **Instant Image Display**: View thumbnails immediately while processing happens in background
-- 🤖 **AI-Powered Captioning**: Uses Gemini 2.5 Flash to generate detailed captions and tags
+- 🤖 **AI-Powered Captioning**: Uses `gemini-2.0-flash-lite` to generate detailed captions and `gemini-embedding-001` for vector embeddings
 - 🔍 **Semantic Search**: Find images using natural language queries with vector similarity
 - ⚡ **Real-time Progress**: Live updates on processing status
 - 🎯 **Background Processing**: Efficient job queues with BullMQ and Redis
@@ -69,15 +69,18 @@ Copy the output and paste it as `TOKEN_ENCRYPTION_KEY` in your `.env` file.
 
 ### 3. Set Up Database
 
+**Development:**
 ```bash
 # Generate Prisma client and push schema to database
 npm run setup-dev
 ```
 
-This will:
-- Generate Prisma client
-- Push database schema (creates tables and indexes)
-- Set up pgvector extension if available
+**Production — always use migrations, not `db push`:**
+```bash
+npx prisma migrate deploy
+```
+
+> ⚠️ Never use `prisma db push` in production — it can drop columns or indexes not tracked by migrations.
 
 ### 4. Reset Database (if needed)
 
@@ -137,7 +140,7 @@ The app will be available at `http://localhost:3000`
 
 ### Database
 - `npm run db:generate` - Generate Prisma client
-- `npm run db:push` - Push schema to database (no migration)
+- `npm run db:push` - Push schema to database (dev only — use `migrate deploy` in production)
 - `npm run db:migrate` - Create and apply migration
 - `npm run db:reset` - **Reset database** (drops all tables, re-runs migrations, clears queues)
 - `npm run db:studio` - Open Prisma Studio (database GUI)
@@ -150,7 +153,7 @@ The app will be available at `http://localhost:3000`
 - `npm run workers:status` - Check worker status
 
 ### Utilities
-- `npm run health-check` - Check system health
+- `npm run health-check` - Check system health (requires `ADMIN_SECRET_TOKEN` env var)
 - `npm run queue:clear` - Clear all job queues
 - `npm run folder:status` - Check folder processing status
 - `npm run folder:retry` - Retry failed folder processing
@@ -160,14 +163,19 @@ The app will be available at `http://localhost:3000`
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL connection string with pgvector support |
+| `DATABASE_URL` | Yes | PostgreSQL connection string with pgvector support. For Railway, add `?connection_limit=5&pool_timeout=10` |
 | `REDIS_URL` | Yes | Redis connection string for job queues |
-| `GOOGLE_DRIVE_API_KEY` | Yes | Google Drive API key for accessing folders |
-| `GEMINI_API_KEY` | Yes | Google AI API key for image captioning |
+| `GOOGLE_DRIVE_API_KEY` | Yes | Google Drive API key for accessing public folders |
+| `GEMINI_API_KEY` | Yes | Google AI API key for image captioning and embeddings |
 | `TOKEN_ENCRYPTION_KEY` | Yes | 32-byte hex key for encrypting OAuth tokens (generate with `openssl rand -hex 32`) |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes | Clerk publishable key for authentication |
 | `CLERK_SECRET_KEY` | Yes | Clerk secret key |
-| `MAX_IMAGES_PER_FOLDER` | No | Maximum images per folder (default: 200) |
+| `ADMIN_SECRET_TOKEN` | Yes (production) | Secret token for `/api/health` and `/api/processing-stats` endpoints |
+| `MAX_IMAGES_PER_FOLDER` | No | Server-side image limit per folder (default: 200) |
+| `NEXT_PUBLIC_MAX_IMAGES_PER_FOLDER` | No | Client-side image limit displayed in the UI (default: 200) |
+| `IMAGE_WORKER_CONCURRENCY` | No | Number of images processed in parallel (default: 2) |
+| `GEMINI_RATE_LIMIT` | No | Gemini API requests per minute (default: 1000) |
+| `OAUTH_TOKEN_TTL_MINUTES` | No | OAuth token TTL stored for background workers (default: 55) |
 
 ## Usage
 
@@ -178,16 +186,39 @@ The app will be available at `http://localhost:3000`
 5. Use the search box to find images using natural language queries
 6. View detailed captions and similarity scores
 
+> **Note on data storage:** AI-generated captions and 768-dimensional vector embeddings are stored permanently in PostgreSQL. Raw image bytes are never stored — images are fetched on-demand from Google Drive.
+
 ## Architecture
 
 - **Frontend**: Next.js 15 with React Server Components
 - **Database**: PostgreSQL with pgvector for vector similarity search
 - **Background Jobs**: BullMQ with Redis for reliable job processing
-- **AI**: Google Gemini 2.5 Flash for image analysis and text embeddings
+- **AI**: `gemini-2.0-flash-lite` for image captioning, `gemini-embedding-001` for text embeddings
 - **Authentication**: Clerk for user management and OAuth
 
 > **Note:** Workers automatically run `CREATE EXTENSION IF NOT EXISTS vector` on startup.
 > Make sure your PostgreSQL instance has pgvector extension installed.
+
+## Railway Deployment
+
+Workers must run as a **separate Railway service** from the Next.js web server. In the Railway dashboard:
+
+1. Create service 1 (web): start command `npm run start`, run migrations with `npm run deploy:migrate`
+2. Create service 2 (worker): start command `npm run workers`, same repo and environment variables
+
+A `Procfile` is included for reference:
+```
+web: npm run start
+worker: npm run workers
+```
+
+### Post-Deploy Steps (first deploy after security hardening)
+
+After deploying, run this SQL once to clear any tokens encrypted with the old AES-CBC scheme:
+
+```sql
+UPDATE folders SET "accessTokenEncrypted" = NULL, "tokenExpiresAt" = NULL;
+```
 
 ## Troubleshooting
 
@@ -201,6 +232,12 @@ npm run db:reset
 If jobs are stuck:
 ```bash
 npm run queue:clear
+```
+
+### Health Check
+Check service health (requires `ADMIN_SECRET_TOKEN`):
+```bash
+npm run health-check
 ```
 
 ### PM2 Issues

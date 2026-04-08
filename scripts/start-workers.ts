@@ -118,16 +118,8 @@ setInterval(() => {
   recoverPendingImages()
 }, 60000)
 
-// Keep the process alive
-process.on("SIGTERM", () => {
-  console.log("Received SIGTERM, shutting down gracefully...")
-  process.exit(0)
-})
-
-process.on("SIGINT", () => {
-  console.log("Received SIGINT, shutting down gracefully...")
-  process.exit(0)
-})
+// Keep the process alive - workers handle SIGINT/SIGTERM in lib/workers.ts
+// These handlers just ensure clean exit after workers close
 
 // Log worker status
 setInterval(() => {

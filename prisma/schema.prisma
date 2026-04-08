@@ -10,13 +10,12 @@ datasource db {
 }
 
 model User {
-  id          String       @id @default(cuid())
-  clerkId     String       @unique // Clerk user ID
-  email       String?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  folders     Folder[]
-  folderScans FolderScan[]
+  id        String   @id @default(cuid())
+  clerkId   String   @unique // Clerk user ID
+  email     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  folders   Folder[]
 
   @@map("users")
 }
@@ -69,37 +68,8 @@ model Image {
   @@map("images")
 }
 
-// Deduplication: Canonical Drive Folder - stored once per unique Drive folder
-model DriveFolder {
-  id             String   @id @default(cuid())
-  driveFolderId  String   @unique // Google Drive folder ID (from URL)
-  folderName     String
-  driveUrl       String   // Original URL
-  referenceCount Int      @default(0)
-  lastScanned    DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-
-  folderScans FolderScan[]
-
-  @@index([driveFolderId])
-  @@map("drive_folders")
-}
-
-// User's reference to a Drive folder - allows same folder to be scanned by multiple users
-model FolderScan {
-  id            String    @id @default(cuid())
-  userId        String?   // null for anonymous free-tier users
-  driveFolderId String
-  scannedAt     DateTime  @default(now())
-  deletedAt     DateTime? // Soft delete
-
-  user        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  driveFolder DriveFolder @relation(fields: [driveFolderId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, driveFolderId]) // Composite unique: user can only scan same folder once
-  @@index([userId])
-  @@index([driveFolderId])
-  @@index([deletedAt])
-  @@map("folder_scans")
-}
+// NOTE (ARCH-008): DriveFolder and FolderScan models have been removed — they were defined
+// for multi-user folder deduplication but were never implemented or referenced in application
+// code. A migration to drop the drive_folders and folder_scans tables should be created
+// and applied in production:
+//   npx prisma migrate dev --name remove-unused-drive-folder-models

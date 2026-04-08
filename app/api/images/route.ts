@@ -1,37 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { imageRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
-
-// Helper function to clean captions
-function cleanCaption(caption?: string): string | undefined {
-  if (!caption) return undefined
-  
-  // Handle HTML-encoded JSON strings
-  let cleanedCaption = caption
-  
-  // Decode HTML entities first
-  if (caption.includes('&quot;')) {
-    cleanedCaption = caption.replace(/&quot;/g, '"')
-  }
-  
-  // Remove markdown code blocks if present
-  if (cleanedCaption.startsWith('```json') && cleanedCaption.endsWith('```')) {
-    cleanedCaption = cleanedCaption.replace(/^```json\n/, '').replace(/\n```$/, '')
-  }
-  
-  // If caption contains JSON structure, extract just the caption text
-  if (cleanedCaption.includes('"caption"')) {
-    try {
-      const parsed = JSON.parse(cleanedCaption)
-      return parsed.caption || caption
-    } catch {
-      // If parsing fails, return as is
-      return caption
-    }
-  }
-  
-  return caption
-}
+import { validateFolderAccess } from "@/lib/folder-auth"
+import { cleanCaption } from "@/lib/caption-utils"
 
 export async function GET(request: NextRequest) {
   try {
@@ -62,21 +33,15 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "folderId parameter is required" }, { status: 400 })
     }
 
-    // Get folder data
-    const folder = await prisma.folder.findUnique({
-      where: { id: folderId },
-      select: {
-        id: true,
-        folderId: true,
-        name: true,
-        status: true,
-        totalImages: true,
-        processedImages: true,
-      },
-    })
+    // Validate folder access (SEC-002)
+    const { folder, hasAccess } = await validateFolderAccess(folderId)
 
     if (!folder) {
       return NextResponse.json({ error: "Folder not found" }, { status: 404 })
+    }
+
+    if (!hasAccess) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
     // Get images for this folder

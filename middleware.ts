@@ -12,9 +12,16 @@ const clerkHandler = (clerkPublishableKey && clerkSecretKey)
   : null
 
 export default function middleware(request: NextRequest, event: NextFetchEvent) {
-  // If Clerk keys are not available, just pass through (for build-time)
+  // If Clerk keys are not available, fail closed (SEC-006)
   if (!clerkHandler) {
-    return NextResponse.next()
+    // Allow health checks through even without Clerk
+    if (request.nextUrl.pathname === '/api/health') {
+      return NextResponse.next()
+    }
+    return NextResponse.json(
+      { error: 'Service unavailable: authentication not configured' },
+      { status: 503 }
+    )
   }
   
   // Use Clerk middleware when keys are available

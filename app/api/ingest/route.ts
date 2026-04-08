@@ -7,11 +7,18 @@ import { queueFolderProcessing } from "@/lib/queue"
 import { encrypt } from "@/lib/encryption"
 import { ingestRateLimiter, getClientIdentifier, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit"
 
+// ARCH-007: OAuth token TTL — Google tokens expire in 3600s; use env override if needed.
+// Clerk does not expose the actual expires_in, so we default to 55 min (conservative).
+const OAUTH_TOKEN_TTL_MS = (() => {
+  const minutes = parseInt(process.env.OAUTH_TOKEN_TTL_MINUTES || '55', 10)
+  return (isNaN(minutes) || minutes <= 0 ? 55 : minutes) * 60 * 1000
+})()
+
 // Get the maximum images limit from environment variable
 const getMaxImagesLimit = (): number | null => {
   const limit = process.env.MAX_IMAGES_PER_FOLDER
   if (!limit) return null
-  
+
   const parsed = parseInt(limit, 10)
   return isNaN(parsed) || parsed <= 0 ? null : parsed
 }
@@ -110,15 +117,6 @@ export async function POST(request: NextRequest) {
       console.log(`   - Database ID: ${existingFolder.id}`)
       console.log(`   - Total Images: ${existingFolder.totalImages}`)
       console.log(`   - Processed Images: ${existingFolder.processedImages}`)
-      
-      // Link folder to user if not already linked
-      if (dbUserId && !existingFolder.userId) {
-        await prisma.folder.update({
-          where: { id: existingFolder.id },
-          data: { userId: dbUserId },
-        })
-        console.log(`🔗 Linked existing folder to user`)
-      }
       
       // Sync folder with Google Drive to detect new/deleted images
       console.log("🔄 Syncing folder with Google Drive...")
@@ -249,7 +247,7 @@ export async function POST(request: NextRequest) {
           status: newStatus,
           // Update token if new one is available
           accessTokenEncrypted: token ? encrypt(token) : undefined,
-          tokenExpiresAt: token ? new Date(Date.now() + 55 * 60 * 1000) : undefined, // ~55 min
+          tokenExpiresAt: token ? new Date(Date.now() + OAUTH_TOKEN_TTL_MS) : undefined, // ~55 min
         },
       })
       
@@ -353,7 +351,7 @@ export async function POST(request: NextRequest) {
         userId: dbUserId,
         // Store encrypted token for background processing
         accessTokenEncrypted: token ? encrypt(token) : null,
-        tokenExpiresAt: token ? new Date(Date.now() + 55 * 60 * 1000) : null, // ~55 min
+        tokenExpiresAt: token ? new Date(Date.now() + OAUTH_TOKEN_TTL_MS) : null, // ~55 min
       },
     })
     

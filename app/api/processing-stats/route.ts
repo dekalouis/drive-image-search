@@ -1,10 +1,14 @@
-import { NextResponse } from "next/server"
-import { getProcessingStats } from "@/lib/workers"
+import { type NextRequest, NextResponse } from "next/server"
+import { getProcessingStatsFromDB } from "@/lib/processing-stats"
+import { checkAdminAuth } from "@/lib/admin-auth"
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = checkAdminAuth(request)
+  if (authError) return authError
+
   try {
-    const stats = await getProcessingStats()
-    
+    const stats = await getProcessingStatsFromDB()
+
     return NextResponse.json({
       success: true,
       data: stats,
@@ -13,12 +17,12 @@ export async function GET() {
   } catch (error) {
     console.error("Failed to get processing stats:", error)
     return NextResponse.json(
-      { 
-        success: false, 
+      {
+        success: false,
         error: "Failed to get processing statistics",
         timestamp: new Date().toISOString(),
-      }, 
+      },
       { status: 500 }
     )
   }
-} 
+}

@@ -1,48 +1,23 @@
 import { Worker, type Job } from "bullmq"
-import IORedis from "ioredis"
 import { prisma } from "@/lib/prisma"
 import { ensureCaptionVectorIndex } from "@/lib/db-init"
 import { captionImage, generateCaptionEmbedding, generateBatchEmbeddings, geminiRateLimiter } from "@/lib/gemini"
 import type { FolderJobData, ImageJobData, ImageBatchJobData } from "@/lib/queue"
-import { queueImageBatch } from "@/lib/queue"
+import { queueImageBatch, redisConnection as connection } from "@/lib/queue"
+import { decrypt } from "@/lib/encryption"
 
-// Redis connection for workers with reconnection logic
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
-  maxRetriesPerRequest: null,
-  // Reconnection settings for Railway restarts
-  retryStrategy: (times: number) => {
-    const delay = Math.min(times * 100, 3000) // Max 3 second delay
-    console.log(`🔄 Redis reconnecting... attempt ${times}, delay ${delay}ms`)
-    return delay
-  },
-  reconnectOnError: (err) => {
-    console.log(`🔄 Redis reconnect on error: ${err.message}`)
-    return true // Always try to reconnect
-  },
-  enableReadyCheck: true,
-  lazyConnect: false,
-})
+// ARCH-011: Use shared Redis connection from lib/queue.ts instead of creating a duplicate
 
-// Add connection event logging
-connection.on("connect", () => {
-  console.log("🔗 Worker Redis connected successfully")
-})
-
-connection.on("error", (error) => {
-  console.error("❌ Worker Redis connection error:", error)
-})
-
-connection.on("ready", () => {
-  console.log("✅ Worker Redis ready for operations")
-})
-
-connection.on("reconnecting", () => {
-  console.log("🔄 Worker Redis reconnecting...")
-})
-
-connection.on("close", () => {
-  console.log("⚠️ Worker Redis connection closed")
-})
+/** Safely decrypt a queue token, returning undefined on failure */
+function decryptQueueToken(encrypted?: string): string | undefined {
+  if (!encrypted) return undefined
+  try {
+    return decrypt(encrypted)
+  } catch {
+    console.warn("⚠️  Failed to decrypt queue token — token will be omitted")
+    return undefined
+  }
+}
 
 // Progress tracking for folders
 const folderProgress = new Map<string, { startTime: number; totalImages: number; processedImages: number }>()
@@ -144,7 +119,8 @@ export const folderWorker = new Worker(
     console.log(`🎯 Folder worker received job: ${job.id} (${job.name})`)
     console.log(`📋 Job data:`, job.data)
     
-      const { folderId, googleFolderId, accessToken } = job.data
+      const { folderId, googleFolderId, accessTokenEncrypted } = job.data
+      const accessToken = decryptQueueToken(accessTokenEncrypted)
 
     console.log(`🚀 Starting folder processing: ${googleFolderId} at ${new Date().toISOString()}`)
 
@@ -568,7 +544,8 @@ export const imageWorker = new Worker(
     
     if (job.name === 'batch-caption') {
       // Process batch of images with optimized two-phase approach
-      const { images, folderId, accessToken } = job.data as ImageBatchJobData
+      const { images, folderId, accessTokenEncrypted } = job.data as ImageBatchJobData
+      const accessToken = decryptQueueToken(accessTokenEncrypted)
       console.log(`📦 Processing batch of ${images.length} images for folder ${folderId}`)
       
       const batchStart = Date.now()
@@ -588,6 +565,9 @@ export const imageWorker = new Worker(
       )
       if (successfulCaptions.length > 0) {
         console.log(`🧮 Phase 2: Generating ${successfulCaptions.length} batch embeddings`)
+        
+        // Rate limit before batch embedding to avoid 429 errors
+        await geminiRateLimiter.waitIfNeeded()
         
         const textsToEmbed = successfulCaptions.map(r => r.caption)
         const embeddings = await generateBatchEmbeddings(textsToEmbed)
@@ -640,13 +620,13 @@ export const imageWorker = new Worker(
         fileId: data.fileId,
         etag: data.etag,
         folderId: data.folderId,
-        accessToken: data.accessToken
+        accessToken: decryptQueueToken(data.accessTokenEncrypted)
       })
     }
   },
   {
     connection,
-    concurrency: 3, // Lower to avoid worker restarts on Railway
+    concurrency: Number(process.env.IMAGE_WORKER_CONCURRENCY) || 2, // Configurable, default 2 to avoid API throttling
     // Stalled job handling - critical for Railway restarts
     lockDuration: 300000, // 5 minutes - image processing can take time
     stalledInterval: 30000, // Check for stalled jobs every 30 seconds
@@ -753,8 +733,11 @@ imageWorker.on("error", (err) => {
 })
 
 // Graceful shutdown
-process.on("SIGINT", async () => {
-  console.log("Shutting down workers...")
+async function shutdown(signal: string) {
+  console.log(`Received ${signal}, shutting down workers...`)
   await Promise.all([folderWorker.close(), imageWorker.close()])
   process.exit(0)
-})
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"))
+process.on("SIGTERM", () => shutdown("SIGTERM"))

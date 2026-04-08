@@ -1,5 +1,6 @@
 import { Queue } from "bullmq"
 import IORedis from "ioredis"
+import { encrypt } from "@/lib/encryption"
 
 // Redis connection with reconnection logic for Railway restarts
 const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
@@ -39,6 +40,9 @@ connection.on("close", () => {
   console.log("⚠️ Queue Redis connection closed")
 })
 
+// Export connection for shared use (rate limiter, thumbnail cache, etc.)
+export { connection as redisConnection }
+
 // Queue configurations
 export const folderQueue = new Queue("folders", {
   connection,
@@ -72,7 +76,8 @@ export const imageQueue = new Queue("images", {
 export interface FolderJobData {
   folderId: string
   googleFolderId: string
-  accessToken?: string
+  /** AES-256-GCM encrypted access token (iv:authTag:ciphertext) — SEC-005 */
+  accessTokenEncrypted?: string
 }
 
 export interface ImageJobData {
@@ -80,7 +85,8 @@ export interface ImageJobData {
   fileId: string
   etag: string
   folderId: string
-  accessToken?: string
+  /** AES-256-GCM encrypted access token (iv:authTag:ciphertext) — SEC-005 */
+  accessTokenEncrypted?: string
 }
 
 export interface ImageBatchJobData {
@@ -93,7 +99,8 @@ export interface ImageBatchJobData {
     name: string
   }>
   folderId: string
-  accessToken?: string
+  /** AES-256-GCM encrypted access token (iv:authTag:ciphertext) — SEC-005 */
+  accessTokenEncrypted?: string
 }
 
 // Queue folder processing job
@@ -107,8 +114,11 @@ export async function queueFolderProcessing(folderId: string, googleFolderId: st
   console.log(`   - Google Folder ID: ${googleFolderId}`)
   console.log(`   - Timestamp: ${new Date().toISOString()}`)
 
+  // Encrypt token before storing in queue payload (SEC-005)
+  const accessTokenEncrypted = accessToken ? encrypt(accessToken) : undefined
+
   try {
-    await folderQueue.add("process", { folderId, googleFolderId, accessToken } as FolderJobData, {
+    await folderQueue.add("process", { folderId, googleFolderId, accessTokenEncrypted } as FolderJobData, {
       jobId,
     })
 
@@ -129,9 +139,11 @@ export async function queueImageCaptioning(imageId: string, fileId: string, etag
 
   console.log(`🚀 Queueing image captioning job: ${jobId}`)
 
+  const accessTokenEncrypted = accessToken ? encrypt(accessToken) : undefined
+
   try {
-    await imageQueue.add("caption", { imageId, fileId, etag, folderId, accessToken } as ImageJobData, {
-      jobId, // Use fileId:etag for idempotency
+    await imageQueue.add("caption", { imageId, fileId, etag, folderId, accessTokenEncrypted } as ImageJobData, {
+      jobId,
     })
 
     console.log(`✅ Successfully queued image captioning job: ${jobId}`)
@@ -142,13 +154,18 @@ export async function queueImageCaptioning(imageId: string, fileId: string, etag
 }
 
 // Queue batch of images
-export async function queueImageBatch(data: ImageBatchJobData) {
+export async function queueImageBatch(data: ImageBatchJobData & { accessToken?: string }) {
   const jobId = `batch:${data.folderId}:${Date.now()}:${Math.random().toString(36).substring(7)}`
-  
+
   console.log(`🚀 Queueing image batch job: ${jobId} with ${data.images.length} images`)
 
+  // Encrypt token before storing in queue payload (SEC-005)
+  const { accessToken, ...rest } = data
+  const accessTokenEncrypted = accessToken ? encrypt(accessToken) : data.accessTokenEncrypted
+  const jobData: ImageBatchJobData = { ...rest, accessTokenEncrypted }
+
   try {
-    const job = await imageQueue.add("batch-caption", data, {
+    const job = await imageQueue.add("batch-caption", jobData, {
       jobId,
       // Ensure job is retried if worker crashes
       attempts: 3,
